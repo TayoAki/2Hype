@@ -23,6 +23,8 @@ The Hypit Skill was written for an agent with a local shell; here is how its ste
   MiniMax H3, GPT Image 2 and Nano Banana to the \`openrouter.default\` Endpoint. Read its limits
   with \`hypit_docs\` path \`@hypit/provider-openrouter\`.
   HypiHub remains the route for voice design, voice clone, hosted alignment and matting.
+  A WAV or MP3 voice reference (\`<seedance:Reference audio=...>\`) works through OpenRouter: the
+  Provider publishes it briefly at this server's \`/staged\` URL, because OpenRouter fetches audio by HTTPS.
   Run \`hypit pricing <run>\` before paid work and tell the user the expected cost.
 - **Supplied images.** Images the user made elsewhere, for example by hand in ChatGPT, are ordinary
   assets: give them a \`file_link\` upload command, then reference the file with \`media:Image\`.

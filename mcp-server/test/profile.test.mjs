@@ -49,3 +49,20 @@ test("without a key nothing is bound, and existing bindings survive a rerun", as
   assert.equal(profile.bindings["@hypit/seedance@1#seedance-2-mini"], "openrouter.default");
   assert.deepEqual(profile.endpoints["hypihub.default"].config.apiKey, { store: "env", key: "HYPIT_HUB_API_KEY" });
 });
+
+test("an HTTPS address lets OpenRouter fetch staged audio and video references, also on a rerun", async () => {
+  const dir = project();
+  await adaptProfile(dir, { env: { OPENROUTER_API_KEY: "sk-or" } });
+  assert.equal(read(dir).endpoints["openrouter.default"].config.stagingBaseUrl, undefined);
+  const staging = { directory: "/data/staged", baseUrl: "https://hypit.example.test/staged" };
+  const notes = await adaptProfile(dir, { env: { OPENROUTER_API_KEY: "sk-or" }, staging });
+  const config = read(dir).endpoints["openrouter.default"].config;
+  assert.equal(config.stagingDirectory, "/data/staged");
+  assert.equal(config.stagingBaseUrl, "https://hypit.example.test/staged");
+  assert.ok(notes.some((note) => note.includes("/staged")));
+
+  const local = project();
+  const refused = await adaptProfile(local, { env: { OPENROUTER_API_KEY: "sk-or" }, staging: { directory: "/x", baseUrl: "http://127.0.0.1:8080/staged" } });
+  assert.equal(read(local).endpoints["openrouter.default"].config.stagingBaseUrl, undefined);
+  assert.ok(refused.some((note) => note.includes("refuses audio and video references")));
+});

@@ -1,3 +1,6 @@
+import { randomBytes } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { RuntimeDoctorDiagnostic } from "@hypit/runtime-local/extension";
 import { canonicalize, defineEndpoint, wakeAfter } from "@hypit/hypit/endpoint";
 import type {
@@ -17,6 +20,7 @@ export const openRouterProviderModule = { name: "@hypit/provider-openrouter", ve
 
 export type PersonReferencePolicy = "submit" | "refuse";
 export type GptImageQuality = "auto" | "low" | "medium" | "high";
+export type ReferenceStaging = { readonly directory: string; readonly baseUrl: string };
 
 export type CreateOpenRouterProviderOptions = {
   readonly instance: string;
@@ -37,8 +41,14 @@ export type CreateOpenRouterProviderOptions = {
    * person-classified images and videos as ordinary references; `refuse` declines such requests.
    */
   readonly personReferences?: PersonReferencePolicy;
-  /** Upper bound for reference bytes inlined into one request as data URLs. Defaults to 24 MiB. */
+  /** Upper bound for image bytes inlined into one request as data URLs. Defaults to 24 MiB. */
   readonly maxInlineBytes?: number;
+  /**
+   * OpenRouter takes audio and video references only as HTTPS URLs. When set, the Provider writes each
+   * such reference to `directory` under a random name and sends `baseUrl/<name>`; the host must serve
+   * that directory at that address. Without it, requests carrying audio or video references are refused.
+   */
+  readonly referenceStaging?: ReferenceStaging;
   readonly fetch?: typeof globalThis.fetch;
 };
 
@@ -69,6 +79,13 @@ function redact(message: string): string {
     .replace(/data:[^\s"']+/giu, "[data-url]")
     .replace(/https?:\/\/\S+/giu, "[url]")
     .slice(0, 600);
+}
+
+/** OpenRouter fetches staged media itself, so only a public HTTPS address will do. */
+function stagingAddress(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "https:") throw new Error("OpenRouter referenceStaging baseUrl must use HTTPS");
+  return url.href.replace(/\/+$/u, "");
 }
 
 function address(value: string): string {
@@ -126,7 +143,8 @@ function commonSupport(spec: OpenRouterModel, request: EndpointRequest): string 
   return undefined;
 }
 
-export function videoSupport(spec: OpenRouterVideoModel, request: EndpointRequest, policy: PersonReferencePolicy): EndpointSupport {
+export function videoSupport(spec: OpenRouterVideoModel, request: EndpointRequest, policy: PersonReferencePolicy,
+  staged = false): EndpointSupport {
   const refuse = (reason: string): EndpointSupport => ({ status: "unsupported", reason: `OpenRouter ${spec.model} ${reason}` });
   const common = commonSupport(spec, request);
   if (common !== undefined) return refuse(common);
@@ -157,6 +175,9 @@ export function videoSupport(spec: OpenRouterVideoModel, request: EndpointReques
   if (policy === "refuse" && hasPersonReference(ports)) {
     return refuse("cannot carry person-reference classifications and this Endpoint is set to refuse them");
   }
+  if (!staged && (present(request, "referenceVideo") || present(request, "referenceAudio"))) {
+    return refuse("takes video and audio references only as HTTPS URLs, and this Endpoint has no referenceStaging to publish them");
+  }
   return { status: "supported" };
 }
 
@@ -186,17 +207,34 @@ export function imageSupport(spec: OpenRouterImageModel, request: EndpointReques
   return { status: "supported" };
 }
 
-/** OpenRouter accepts references as base64 data URLs, so no separate upload service is needed. */
-function inlineResolver(resources: ResourceStore, maxBytes: number) {
+const STAGED_EXTENSIONS: Readonly<Record<string, string>> = {
+  "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav", "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
+  "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+};
+
+/**
+ * Images travel inline as base64 data URLs. OpenRouter rejects data URLs for audio and video, so those
+ * are written under an unguessable name to the staging directory and sent as its HTTPS address.
+ */
+function referenceResolver(resources: ResourceStore, maxBytes: number, staging: ReferenceStaging | undefined) {
   let used = 0;
   return async (artifact: BlobRef): Promise<string> => {
-    used += artifact.size;
-    if (used > maxBytes) {
-      throw new Error(`References exceed this Endpoint's ${Math.round(maxBytes / 1024 / 1024)} MiB inline limit; raise maxInlineMegabytes or use smaller media`);
+    const inline = artifact.mediaType.startsWith("image/");
+    if (inline) {
+      used += artifact.size;
+      if (used > maxBytes) {
+        throw new Error(`Reference images exceed this Endpoint's ${Math.round(maxBytes / 1024 / 1024)} MiB inline limit; raise maxInlineMegabytes or use smaller media`);
+      }
+    } else if (staging === undefined) {
+      throw new Error(`OpenRouter takes ${artifact.mediaType} references only as HTTPS URLs; configure referenceStaging`);
     }
     const bytes = await resources.get(artifact.resource);
     if (bytes === undefined) throw new Error("Reference media is unavailable in the Build's resource store");
-    return `data:${artifact.mediaType};base64,${Buffer.from(bytes).toString("base64")}`;
+    if (inline) return `data:${artifact.mediaType};base64,${Buffer.from(bytes).toString("base64")}`;
+    const name = `${randomBytes(16).toString("hex")}${STAGED_EXTENSIONS[artifact.mediaType] ?? ".bin"}`;
+    await mkdir(staging!.directory, { recursive: true });
+    await writeFile(join(staging!.directory, name), bytes);
+    return `${staging!.baseUrl}/${name}`;
   };
 }
 
@@ -335,6 +373,8 @@ export function createOpenRouterProvider(options: CreateOpenRouterProviderOption
   const quality = options.gptImageQuality ?? "medium";
   const personPolicy = options.personReferences ?? "submit";
   const maxInline = options.maxInlineBytes ?? 24 * 1024 * 1024;
+  const staging = options.referenceStaging === undefined ? undefined
+    : { directory: options.referenceStaging.directory, baseUrl: stagingAddress(options.referenceStaging.baseUrl) };
   const key = (credentials: Readonly<Record<string, { readonly secret: string }>>) =>
     text(credentials.apiKey?.secret, "OpenRouter API key");
 
@@ -367,13 +407,13 @@ export function createOpenRouterProvider(options: CreateOpenRouterProviderOption
   function videoEndpoint(spec: OpenRouterVideoModel): AsyncEndpoint {
     return {
       async start(context) {
-        const support = videoSupport(spec, context.need, personPolicy);
+        const support = videoSupport(spec, context.need, personPolicy, staging !== undefined);
         if (support.status === "unsupported") throw new Error(support.reason);
         const secret = key(context.credentials);
         const authored = context.need.constraints as unknown as GenerationRequest;
         selectWireModelForRequest(spec.mapping, authored);
         await context.reportProgress?.({ phase: `Preparing ${spec.model} request` });
-        const compiled = await compileWireRequest(spec.mapping, authored, inlineResolver(context.resources, maxInline));
+        const compiled = await compileWireRequest(spec.mapping, authored, referenceResolver(context.resources, maxInline, staging));
         const body = videoBody(spec, compiled.input as Readonly<Record<string, CanonicalValue>>);
         await context.reportProgress?.({ phase: `Submitting ${spec.model} request` });
         const job = await api("POST", "/videos", secret, body, requestTimeout);
@@ -452,7 +492,7 @@ export function createOpenRouterProvider(options: CreateOpenRouterProviderOption
       const secret = key(context.credentials);
       const authored = context.need.constraints as unknown as GenerationRequest;
       await context.reportProgress?.({ phase: `Generating image with ${spec.model}` });
-      const compiled = await compileWireRequest(spec.mapping, authored, inlineResolver(context.resources, maxInline));
+      const compiled = await compileWireRequest(spec.mapping, authored, referenceResolver(context.resources, maxInline, staging));
       const body = imageBody(spec, compiled.input as Readonly<Record<string, CanonicalValue>>, quality);
       const result = await api("POST", "/images", secret, body, imageTimeout);
       const data = Array.isArray(result.data) ? result.data : [];
@@ -481,7 +521,7 @@ export function createOpenRouterProvider(options: CreateOpenRouterProviderOption
   const capabilities: EndpointCapability[] = openRouterModels.map((spec): EndpointCapability => spec.kind === "video"
     ? {
         capability: spec.mapping.capability, returns: generationTypes.videoSet, lifecycle: "asynchronous",
-        supports: (request) => videoSupport(spec, request, personPolicy), endpoint: videoEndpoint(spec),
+        supports: (request) => videoSupport(spec, request, personPolicy, staging !== undefined), endpoint: videoEndpoint(spec),
       }
     : {
         capability: spec.mapping.capability, returns: generationTypes.imageSet, lifecycle: "immediate",

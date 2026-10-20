@@ -1,5 +1,5 @@
 import { createWriteStream, existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -165,7 +165,33 @@ app.put("/files/:project/*path", fileAccess("PUT"), async (req, res) => {
   }
 });
 
+/** Names the OpenRouter Provider gives staged references: 128 random bits and a media extension. */
+const STAGED_NAME = /^[0-9a-f]{32}\.(wav|mp3|mp4|mov|webm|bin)$/;
+
+app.get("/staged/:name", async (req, res) => {
+  const name = String(req.params.name);
+  const info = STAGED_NAME.test(name) ? await stat(join(config.stagingDir, name)).catch(() => undefined) : undefined;
+  if (!info?.isFile()) {
+    res.status(404).type("text/plain").send("Not found.\n");
+    return;
+  }
+  res.sendFile(join(config.stagingDir, name), { headers: { "Cache-Control": "private, no-store" } });
+});
+
+/** Staged references only need to outlive the generation request that fetches them. */
+async function sweepStaged(): Promise<void> {
+  const cutoff = Date.now() - config.stagingMaxAgeHours * 3_600_000;
+  for (const name of await readdir(config.stagingDir).catch(() => [] as string[])) {
+    const path = join(config.stagingDir, name);
+    const info = await stat(path).catch(() => undefined);
+    if (info?.isFile() && info.mtimeMs < cutoff) await rm(path, { force: true });
+  }
+}
+
 await mkdir(config.workspace, { recursive: true });
+await mkdir(config.stagingDir, { recursive: true });
+void sweepStaged();
+setInterval(() => void sweepStaged(), 3_600_000).unref();
 if (!existsSync(join(config.hypitHome, "bin", "hypit.mjs"))) {
   console.error(`Hypit Distribution not found at ${config.hypitHome}; set HYPIT_HOME.`);
   process.exit(1);

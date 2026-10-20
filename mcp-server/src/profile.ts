@@ -25,6 +25,8 @@ const GPT_IMAGE_QUALITIES = ["auto", "low", "medium", "high"];
 type ProfileOptions = {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly renderWorkers?: number | undefined;
+  /** Where OpenRouter can fetch audio and video references: a directory this server serves at `baseUrl`. */
+  readonly staging?: { readonly directory: string; readonly baseUrl: string } | undefined;
 };
 
 /** Adapt a freshly initialised (or existing) Runtime Profile to this server. Returns notes for the agent. */
@@ -60,6 +62,17 @@ export async function adaptProfile(dir: string, options: ProfileOptions): Promis
           ...(quality && GPT_IMAGE_QUALITIES.includes(quality) ? { gptImageQuality: quality } : {}),
         },
       };
+    }
+    const openRouter = profile.endpoints["openrouter.default"];
+    if (openRouter?.use === "@hypit/provider-openrouter" && options.staging?.baseUrl.startsWith("https://")) {
+      openRouter.config ??= {};
+      if (openRouter.config.stagingDirectory === undefined && openRouter.config.stagingBaseUrl === undefined) {
+        openRouter.config.stagingDirectory = options.staging.directory;
+        openRouter.config.stagingBaseUrl = options.staging.baseUrl;
+        notes.push("openrouter.default publishes audio and video references at this server's /staged URL, because OpenRouter fetches them by HTTPS.");
+      }
+    } else if (openRouter?.config?.stagingBaseUrl === undefined) {
+      notes.push("This server has no public HTTPS address, so openrouter.default refuses audio and video references. Set PUBLIC_BASE_URL and rerun project_create.");
     }
     profile.bindings ??= {};
     const bound: string[] = [];

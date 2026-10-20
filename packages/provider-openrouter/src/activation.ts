@@ -28,6 +28,7 @@ const adapter = createRuntimeEndpointAdapterFacet({
     runtimeConfigExact(config, [
       "baseUrl", "apiKey", "defaultConcurrency", "actionLimits", "pollIntervalMs", "requestTimeoutMs",
       "imageTimeoutMs", "downloadTimeoutMs", "gptImageQuality", "personReferences", "maxInlineMegabytes",
+      "stagingDirectory", "stagingBaseUrl",
     ], "OpenRouter");
     const apiKey = runtimeConfigCredentialRef(config.apiKey, "OpenRouter apiKey");
     if (apiKey === undefined) throw new Error("OpenRouter apiKey CredentialRef is required");
@@ -43,6 +44,11 @@ const adapter = createRuntimeEndpointAdapterFacet({
       QUALITIES, "OpenRouter gptImageQuality");
     const personReferences = oneOf(runtimeConfigString(config.personReferences, "OpenRouter personReferences"),
       PERSON_POLICIES, "OpenRouter personReferences");
+    const stagingDirectory = runtimeConfigString(config.stagingDirectory, "OpenRouter stagingDirectory");
+    const stagingBaseUrl = runtimeConfigString(config.stagingBaseUrl, "OpenRouter stagingBaseUrl");
+    if ((stagingDirectory === undefined) !== (stagingBaseUrl === undefined)) {
+      throw new Error("OpenRouter stagingDirectory and stagingBaseUrl must be set together");
+    }
     const options: CreateOpenRouterProviderOptions = {
       instance: context.instance,
       pool: context.pool,
@@ -57,6 +63,8 @@ const adapter = createRuntimeEndpointAdapterFacet({
       ...(maxInlineMegabytes === undefined ? {} : { maxInlineBytes: maxInlineMegabytes * 1024 * 1024 }),
       ...(gptImageQuality === undefined ? {} : { gptImageQuality }),
       ...(personReferences === undefined ? {} : { personReferences }),
+      ...(stagingDirectory === undefined || stagingBaseUrl === undefined ? {}
+        : { referenceStaging: { directory: stagingDirectory, baseUrl: stagingBaseUrl } }),
     };
     return {
       endpoint: createOpenRouterProvider(options),

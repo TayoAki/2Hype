@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { EndpointRegistry, MemoryResourceStore } from "@hypit/executor";
 import { assertMappingCoversPorts, generationTypes } from "@hypit/generation";
@@ -127,13 +130,16 @@ test("a Seedance first-frame video is submitted inline, polled, costed and colle
   assert.deepEqual(progress, ["Preparing bytedance/seedance-2.0 request", "Submitting bytedance/seedance-2.0 request", "Receiving generated video"]);
 });
 
-test("Seedance references map by kind, and 4k uses OpenRouter's spelling", async () => {
+test("Seedance references map by kind, audio and video are staged, and 4k uses OpenRouter's spelling", async () => {
   const resources = new MemoryResourceStore();
   const image = await resources.put(PNG, "image/png");
   const video = await resources.put(MP4, "video/mp4");
-  const audio = await resources.put(new Uint8Array([0x49, 0x44, 0x33]), "audio/mpeg");
+  const MP3 = new Uint8Array([0x49, 0x44, 0x33]);
+  const audio = await resources.put(MP3, "audio/mpeg");
+  const directory = await mkdtemp(join(tmpdir(), "openrouter-staging-"));
   const { calls, fetch } = recorder(() => Response.json({ id: "gen-vid-2", status: "pending", polling_url: "x" }, { status: 202 }));
-  const provider = createOpenRouterProvider({ instance: "o", pool: "o", apiKey, baseUrl: BASE, fetch });
+  const provider = createOpenRouterProvider({ instance: "o", pool: "o", apiKey, baseUrl: BASE, fetch,
+    referenceStaging: { directory, baseUrl: "https://media.example.test/staged/" } });
   const request = need("seedance-2", "@hypit/seedance", sealSeedanceRequest("seedance-2", {
     ...seedanceBase, resolution: ["4k"], aspectRatio: ["16:9"],
     referenceImage: [{ role: "image", artifact: image, fields: { personReference: false } }],
@@ -149,8 +155,15 @@ test("Seedance references map by kind, and 4k uses OpenRouter's spelling", async
     operation: "o", resources, credentials: { apiKey: { secret: "k" } } });
   const body = calls[0]!.body!;
   assert.equal(body.resolution, "4K");
-  const references = body.input_references as { type: string }[];
+  const references = body.input_references as { type: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string } }[];
   assert.deepEqual(references.map((item) => item.type), ["image_url", "video_url", "audio_url"]);
+  assert.match(references[0]!.image_url!.url, /^data:image\/png;base64,/u);
+  const staged = [[references[1]!.video_url!.url, ".mp4", MP4], [references[2]!.audio_url!.url, ".mp3", MP3]] as const;
+  for (const [url, extension, bytes] of staged) {
+    const name = url.replace("https://media.example.test/staged/", "");
+    assert.match(name, new RegExp(`^[0-9a-f]{32}\\${extension}$`, "u"));
+    assert.deepEqual(new Uint8Array(await readFile(join(directory, name))), bytes);
+  }
   assert.equal(body.frame_images, undefined);
 });
 
@@ -185,6 +198,17 @@ test("requests OpenRouter cannot serve are refused with reasons, not narrowed", 
   }));
   assert.equal(reason(offer(provider, "seedance-2").supports!(person)), "supported");
   assert.match(reason(offer(strict, "seedance-2").supports!(person)), /person-reference/u);
+  // OpenRouter rejects data URLs for audio, so an Endpoint without staging refuses it at plan time.
+  const voiced = need("seedance-2", "@hypit/seedance", sealSeedanceRequest("seedance-2", {
+    ...seedanceBase, referenceImage: [{ role: "image", artifact, fields: { personReference: true } }],
+    referenceAudio: [{ role: "audio", artifact: await store.put(new Uint8Array([1]), "audio/wav") }],
+  }));
+  assert.match(reason(offer(provider, "seedance-2").supports!(voiced)), /only as HTTPS URLs/u);
+  const staged = createOpenRouterProvider({ instance: "o", pool: "o", apiKey, baseUrl: BASE,
+    referenceStaging: { directory: tmpdir(), baseUrl: "https://media.example.test" } });
+  assert.equal(reason(offer(staged, "seedance-2").supports!(voiced)), "supported");
+  assert.throws(() => createOpenRouterProvider({ instance: "o", pool: "o", apiKey, baseUrl: BASE,
+    referenceStaging: { directory: tmpdir(), baseUrl: "http://media.example.test" } }), /must use HTTPS/u);
   // A future reference video is judged before its bytes exist.
   const pending = { ...need("minimax-h3", "@hypit/minimax-h3", sealMinimaxH3Request({ prompt: ["x"], duration: [6], aspectRatio: ["9:16"] })),
     pendingInputs: [{ input: "referenceVideo", role: "video" }] };

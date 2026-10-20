@@ -32,7 +32,8 @@ plus notes on how its local-shell steps map onto these tools.
 | `OPENROUTER_GPT_IMAGE_QUALITY` | `medium` | `auto`, `low`, `medium` or `high` for GPT Image 2 through OpenRouter. It sets that model's price. |
 | `HYPIT_HUB_API_KEY` | unset | HypiHub API key, for voices, hosted alignment, matting and models OpenRouter lacks. |
 | `HYPIT_RENDER_WORKERS` | unset | Browser workers for local HTML rendering in new projects. Match it to the machine size. |
-| `PUBLIC_BASE_URL` | Railway domain | Base URL used in signed file links. |
+| `PUBLIC_BASE_URL` | Railway domain | Base URL used in signed file links and for staged OpenRouter references. |
+| `HYPIT_STAGING_DIR`, `HYPIT_STAGING_MAX_AGE_HOURS` | `/data/staged`, `24` | Audio and video references the OpenRouter Provider publishes at `GET /staged/<random name>` (no token; names carry 128 random bits) and the age after which they are deleted. |
 | `MCP_SIGNING_SECRET` | the auth token | Separate key for signed links, if you want to rotate them independently. |
 | `MCP_ENABLE_SHELL` | `1` | Set to `0` to remove `run_command`. Component authoring needs it. |
 | `MCP_DEFAULT_TIMEOUT_SECONDS` / `MCP_MAX_TIMEOUT_SECONDS` | `120` / `600` | Foreground command limits. Longer work runs as a background job. |

@@ -26,6 +26,12 @@ export const config = {
   /** Where video projects live; on Railway this sits on the mounted volume. */
   workspace,
   jobsDir: resolve(process.env.HYPIT_JOBS_DIR ?? join(workspace, "..", "jobs")),
+  /**
+   * Reference media the OpenRouter Provider publishes for one request (OpenRouter fetches audio and
+   * video references by HTTPS URL). Served without auth under unguessable names, then swept.
+   */
+  stagingDir: resolve(process.env.HYPIT_STAGING_DIR ?? join(workspace, "..", "staged")),
+  stagingMaxAgeHours: intFromEnv("HYPIT_STAGING_MAX_AGE_HOURS", 24),
   /** Base URL used in signed file links; falls back to the Railway domain, then the request host. */
   publicBaseUrl:
     process.env.PUBLIC_BASE_URL?.replace(/\/+$/, "") ??

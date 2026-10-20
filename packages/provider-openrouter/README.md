@@ -51,7 +51,8 @@ the same one. A writable Store also works: `hypit auth login openrouter.default`
 | `baseUrl` | `https://openrouter.ai/api/v1` | API base; HTTPS, or loopback HTTP for tests |
 | `gptImageQuality` | `medium` | `auto`, `low`, `medium` or `high` for GPT Image 2. It drives that model's price |
 | `personReferences` | `submit` | OpenRouter has no person-reference field. `submit` sends such media as ordinary references; `refuse` declines the request |
-| `maxInlineMegabytes` | `24` | Reference bytes inlined into one request as base64 data URLs |
+| `maxInlineMegabytes` | `24` | Reference image bytes inlined into one request as base64 data URLs |
+| `stagingDirectory`, `stagingBaseUrl` | unset | Set together. Audio and video references are written to the directory under random names and sent as `stagingBaseUrl/<name>`, which must be public HTTPS serving that directory |
 | `defaultConcurrency` | `4` | Simultaneous requests across this Endpoint |
 | `actionLimits` | submit 2, poll 8, collect 2 | Video lifecycle admission |
 | `pollIntervalMs` | `10000` | Delay between video status reads |
@@ -63,8 +64,12 @@ the same one. A writable Store also works: `hypit auth login openrouter.default`
   `GET /videos/{id}/content`. The job id is checkpointed before polling starts. Status reads that hit
   HTTP 408, 429, 5xx or a network failure are retried up to 30 times on the same job.
 - **Images** use the synchronous `POST /images` and store the returned base64 image.
-- **References** travel inline as data URLs: first and last frames as `frame_images`, image, video
-  and audio references as `input_references`. No upload service is involved.
+- **References**: images travel inline as data URLs, first and last frames as `frame_images` and
+  reference images as `input_references`. OpenRouter rejects data URLs for audio and video
+  ("Only HTTPS URLs are allowed"), so those are staged: written under a 128-bit random name to
+  `stagingDirectory` and sent as `audio_url` or `video_url` entries pointing at `stagingBaseUrl`.
+  Without staging, a request with audio or video references is refused before it is submitted.
+  The host owns serving and deleting staged files.
 - **Cost**: when OpenRouter reports a job's cost, the Provider records it as an execution diagnostic.
   `hypit pricing` reads the public model catalogue and states the per-second rate at the requested size.
 - **Doctor**: `hypit doctor --endpoint openrouter.default` checks the key, reports remaining credits
