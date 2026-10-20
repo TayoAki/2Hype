@@ -31,6 +31,10 @@
 // archetypes and what each piece of on-screen text conveys. It keeps no transcript, lyrics or verbatim copy and no
 // detailed character designs. Motion and the colour palette are measured locally from the pixels.
 //
+// --own is for video the producer made or may adapt: --analyze then also keeps the full transcript (transcript.json and
+// transcript.srt with word timings), each shot's exact on-screen text and a detailed description, and full character
+// and brand designs; --template starts every slot prompt from its description and lists its source frame.
+//
 // --template keeps only the structure (slot timing plus those labels). Each slot gets an empty "prompt" for
 // your own subject. --svml writes main.svml, main.svrun and look.svs that generate new Seedance clips; with
 // --group <seconds> neighbouring slots share one multi-shot clip, because Seedance bills at least 4 seconds per
@@ -41,7 +45,10 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 
-const OPENROUTER = "https://openrouter.ai/api/v1/chat/completions";
+// OPENROUTER_BASE_URL points the tool at another OpenRouter-compatible server, for example a local mock in tests.
+const OPENROUTER_BASE = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+const OPENROUTER = `${OPENROUTER_BASE}/chat/completions`;
+const TRANSCRIPTIONS = `${OPENROUTER_BASE}/audio/transcriptions`;
 const LABELS = {
   shot_size: ["extreme-wide", "wide", "medium", "close-up", "extreme-close-up"],
   angle: ["eye-level", "high", "low", "overhead", "aerial", "pov"],
@@ -57,21 +64,21 @@ function usage(message) {
   if (message) console.error(`shot-list: ${message}\n`);
   console.error("Usage: node tools/shot-list.mjs <video> [--out <dir>] [--threshold 0.3] [--min-shot 0.25]\n" +
     "                     [--frame middle|first|last] [--width 540] [--columns 6] [--metrics]\n" +
-    "                     [--analyze [--model <openrouter model>] [--concurrency 2]] [--template] [--spec]\n" +
+    "                     [--analyze [--model <openrouter model>] [--concurrency 2]] [--template] [--spec] [--own]\n" +
     "       node tools/shot-list.mjs --svml <filled-template.json> [--group 15] [--out <dir>]");
   process.exit(message ? 1 : 0);
 }
 
 function parseArgs(argv) {
   const options = { threshold: 0.3, minShot: 0.25, frame: "middle", width: 540, columns: 6,
-    analyze: false, template: false, metrics: false, spec: false, model: "google/gemini-2.5-flash", concurrency: 2, group: 0 };
+    analyze: false, template: false, metrics: false, spec: false, own: false, model: "google/gemini-2.5-flash", concurrency: 2, group: 0 };
   const values = { "--out": "out", "--threshold": "threshold", "--min-shot": "minShot", "--frame": "frame", "--width": "width",
     "--columns": "columns", "--model": "model", "--concurrency": "concurrency", "--svml": "svml", "--group": "group" };
   const strings = new Set(["out", "frame", "model", "svml"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") usage();
-    if (["--analyze", "--template", "--metrics", "--spec"].includes(arg)) {
+    if (["--analyze", "--template", "--metrics", "--spec", "--own"].includes(arg)) {
       options[arg.slice(2)] = true;
     } else if (values[arg]) {
       const value = argv[++i];
@@ -217,8 +224,17 @@ const SCHEMA = {
   },
 };
 
-async function labelShot(frames, shot, total, model) {
-  const text = `You label the visual grammar of one shot (number ${shot.index} of ${total}, ${shot.duration.toFixed(2)}s) from a short
+const OWN_SHOT_SCHEMA = {
+  ...SCHEMA, required: [...SCHEMA.required, "description", "on_screen_text"],
+  properties: { ...SCHEMA.properties, description: { type: "string" }, on_screen_text: { type: "string" } },
+};
+
+async function labelShot(frames, shot, total, model, own) {
+  const text = own ? `This is the producer's own video. Label the visual grammar of one shot (number ${shot.index} of ${total},
+${shot.duration.toFixed(2)}s); the three images are its start, middle and end. Infer camera_move from how the view changes.
+beat is the shot's role in the edit (shot 1 is usually the hook). Also give description: what happens in the shot in
+at most 45 words (characters, action, setting, framing, colours), detailed enough to generate a matching new take, and
+on_screen_text: every overlaid word exactly as shown, lines separated by " / " (empty string if none).` : `You label the visual grammar of one shot (number ${shot.index} of ${total}, ${shot.duration.toFixed(2)}s) from a short
 vertical video, for an editor's pacing study. The three images are the shot's start, middle and end.
 Infer camera_move from how the view changes across them. beat is the shot's role in the edit (shot 1 is usually the hook).
 text_role and text_position describe any overlaid text by role and placement only.
@@ -227,7 +243,7 @@ Return only the labels. Do not transcribe on-screen words, name people or brands
     model,
     messages: [{ role: "user", content: [{ type: "text", text },
       ...frames.map((jpeg) => ({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpeg.toString("base64")}` } }))] }],
-    response_format: { type: "json_schema", json_schema: { name: "shot_labels", strict: true, schema: SCHEMA } },
+    response_format: { type: "json_schema", json_schema: { name: own ? "own_shot_labels" : "shot_labels", strict: true, schema: own ? OWN_SHOT_SCHEMA : SCHEMA } },
     temperature: 0,
   };
   const json = await postOpenRouter(OPENROUTER, body);
@@ -241,8 +257,16 @@ Return only the labels. Do not transcribe on-screen words, name people or brands
 
 async function postOpenRouter(url, body) {
   for (let attempt = 1; ; attempt++) {
-    const response = await fetch(url, { method: "POST", body: JSON.stringify(body),
-      headers: { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`, "content-type": "application/json" } });
+    let response;
+    try {
+      response = await fetch(url, { method: "POST", body: JSON.stringify(body), signal: AbortSignal.timeout(120_000),
+        headers: { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`, "content-type": "application/json" } });
+    } catch (error) {
+      // Dropped connections and timeouts are as transient as a 5xx; retry them the same way.
+      if (attempt >= 6) throw new Error(`OpenRouter request failed after ${attempt} attempts: ${error.cause?.code ?? error.message}`);
+      await new Promise((done) => setTimeout(done, Math.min(20_000, 1000 * 2 ** attempt) + Math.random() * 1000));
+      continue;
+    }
     const json = await response.json().catch(() => ({}));
     if (response.ok) return json;
     if (attempt >= 6 || ![408, 429, 500, 502, 503, 504].includes(response.status)) {
@@ -265,7 +289,7 @@ async function analyse(video, shots, fps, options) {
       shot.motion = motionScore(video, times);
       shot.palette = palette(video, times[1]);
       try {
-        const result = await labelShot(times.map((t) => grab(video, t, "scale=384:-2", "jpeg")), shot, shots.length, options.model);
+        const result = await labelShot(times.map((t) => grab(video, t, "scale=384:-2", "jpeg")), shot, shots.length, options.model, options.own);
         Object.assign(shot, result.labels);
         cost += result.cost;
       } catch (error) {
@@ -339,8 +363,11 @@ const AUDIO_SCHEMA = {
   },
 };
 
-/** Audio structure labels and, when there is speech, its pace. No transcript is kept. */
-async function analyseAudio(video, model) {
+/**
+ * Audio structure labels and, when there is speech, its pace. Only own-content mode keeps the transcript;
+ * otherwise the words are counted and discarded.
+ */
+async function analyseAudio(video, model, own) {
   const mp3 = run("ffmpeg", ["-hide_banner", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", "-f", "mp3", "-"], "buffer").stdout;
   const data = mp3.toString("base64");
   const text = `Label the structure of this advert or short-video soundtrack for an editor's format study.
@@ -351,9 +378,9 @@ Do not transcribe speech or lyrics, and do not name songs, artists, people or br
     response_format: { type: "json_schema", json_schema: { name: "audio_labels", strict: true, schema: AUDIO_SCHEMA } } });
   const content = json.choices?.[0]?.message?.content ?? "";
   const labels = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1));
-  let cost = json.usage?.cost ?? 0, pace = null;
-  if (labels.voiceover) {
-    const stt = await postOpenRouter("https://openrouter.ai/api/v1/audio/transcriptions", { model: "elevenlabs/scribe-v2",
+  let cost = json.usage?.cost ?? 0, pace = null, transcript = null;
+  if (labels.voiceover || own) {
+    const stt = await postOpenRouter(TRANSCRIPTIONS, { model: "elevenlabs/scribe-v2",
       input_audio: { data, format: "mp3" }, response_format: "verbose_json", timestamp_granularities: ["word"] });
     const words = (stt.words ?? []).filter((w) => (w.type ?? "word") === "word" && String(w.word).trim());
     if (words.length) {
@@ -361,10 +388,31 @@ Do not transcribe speech or lyrics, and do not name songs, artists, people or br
       const spoken = words.at(-1).end - words[0].start;
       pace = { words: words.length, speechStart: round(words[0].start), speechEnd: round(words.at(-1).end),
         wordsPerSecond: round(words.length / spoken), pausesOver300ms: gaps.filter((g) => g > 0.3).length, longestPause: round(Math.max(0, ...gaps)) };
+      if (own) transcript = words.map((w) => ({ word: String(w.word).trim(), start: round(w.start), end: round(w.end) }));
     }
     cost += stt.usage?.cost ?? 0;
   }
-  return { labels, pace, cost };
+  return { labels, pace, transcript, cost };
+}
+
+/** Transcript lines: break at sentence ends and at pauses longer than half a second. */
+function transcriptLines(words) {
+  const lines = [];
+  let current = [];
+  words.forEach((w, i) => {
+    current.push(w);
+    const next = words[i + 1];
+    if (!next || /[.!?]$/.test(w.word) || next.start - w.end > 0.5) {
+      lines.push({ start: current[0].start, end: current.at(-1).end, text: current.map((x) => x.word).join(" ") });
+      current = [];
+    }
+  });
+  return lines;
+}
+
+function srtTime(seconds) {
+  const ms = Math.round(seconds * 1000), pad = (n, w = 2) => String(n).padStart(w, "0");
+  return `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor(ms / 60000) % 60)}:${pad(Math.floor(ms / 1000) % 60)},${pad(ms % 1000, 3)}`;
 }
 
 const CONTENT_SCHEMA = {
@@ -389,6 +437,39 @@ const words = (text, limit) => String(text ?? "").split(/\s+/).filter(Boolean).s
  * What the reference says and shows, paraphrased: message, offers, call to action, brand positioning, cast archetypes
  * and the purpose of its on-screen text. For understanding and contrast; it holds no transcript, lyrics or copy.
  */
+const OWN_CONTENT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["message_summary", "offers_or_claims", "call_to_action", "tone", "brand", "characters", "music_theme"],
+  properties: {
+    message_summary: { type: "string" }, call_to_action: { type: "string" }, tone: { type: "string" }, music_theme: { type: "string" },
+    offers_or_claims: { type: "array", items: { type: "string" } },
+    brand: { type: "object", additionalProperties: false, required: ["name", "tagline", "positioning", "visual_identity"],
+      properties: { name: { type: "string" }, tagline: { type: "string" }, positioning: { type: "string" }, visual_identity: { type: "string" } } },
+    characters: { type: "array", items: { type: "object", additionalProperties: false, required: ["name_or_role", "design", "prominence"],
+      properties: { name_or_role: { type: "string" }, design: { type: "string" }, prominence: { type: "string", enum: ["lead", "supporting", "background"] } } } },
+  },
+};
+
+/** Own-content mode: the same summary in full detail, for making new versions of the producer's own video. */
+async function describeOwnContent(video, shots, model) {
+  const mp3 = hasAudio(video) ? run("ffmpeg", ["-hide_banner", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", "-f", "mp3", "-"], "buffer").stdout : null;
+  const picks = shots.length <= 10 ? shots : Array.from({ length: 10 }, (_, i) => shots[Math.round((i * (shots.length - 1)) / 9)]);
+  const frames = picks.map((s) => grab(video, (s.start + s.end) / 2, "scale=512:-2", "jpeg"));
+  const text = `This is the producer's own video; they will make new versions of it. Describe it in full detail.
+message_summary at most 80 words. offers_or_claims and call_to_action exactly as presented. brand: name, the tagline
+exactly as shown or spoken (empty if none), positioning, and visual_identity (colours, logo and type style). characters:
+every recurring character, with a design description of at most 70 words (proportions, face, hair, outfit, colours,
+material or render style) precise enough to keep them consistent in new shots. The images are frames in order.`;
+  const content = [{ type: "text", text }, ...frames.map((jpeg) => ({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpeg.toString("base64")}` } })),
+    ...(mp3 ? [{ type: "input_audio", input_audio: { data: mp3.toString("base64"), format: "mp3" } }] : [])];
+  const json = await postOpenRouter(OPENROUTER, { model, temperature: 0, messages: [{ role: "user", content }],
+    response_format: { type: "json_schema", json_schema: { name: "own_content", strict: true, schema: OWN_CONTENT_SCHEMA } } });
+  const raw = json.choices?.[0]?.message?.content ?? "";
+  const c = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+  return { summary: { own: true, messageSummary: c.message_summary, offersOrClaims: c.offers_or_claims, callToAction: c.call_to_action,
+    tone: c.tone, musicTheme: c.music_theme, brand: c.brand, characters: c.characters }, cost: json.usage?.cost ?? 0 };
+}
+
 async function summariseContent(video, shots, model) {
   const mp3 = hasAudio(video) ? run("ffmpeg", ["-hide_banner", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", "-f", "mp3", "-"], "buffer").stdout : null;
   const picks = shots.length <= 8 ? shots : Array.from({ length: 8 }, (_, i) => shots[Math.round((i * (shots.length - 1)) / 7)]);
@@ -421,13 +502,17 @@ not its wording. The images are frames from across the video, in order.`;
 const GRAMMAR = ["beat", "shot_size", "angle", "camera_move", "person_on_screen", "text_role", "text_position"];
 
 function writeTemplate(out, summary, shots) {
+  const own = summary.ownContent === true;
   const template = {
     format: "shot-list.template@1",
-    note: "Structure only: slot timing and shot grammar. Write every prompt yourself, about your own subject; nothing here describes the source's content.",
+    note: own ? "Own content: prompts start from each shot's description; edit what this version changes. Source frames may be added to references."
+      : "Structure only: slot timing and shot grammar. Write every prompt yourself, about your own subject; nothing here describes the source's content.",
     fps: summary.fps, aspectRatio: summary.aspectRatio, duration: summary.duration,
     seedance: { model: "mini", resolution: "720p" },
     slots: shots.map((s) => ({ slot: s.index, start: round(s.start), duration: round(s.duration),
-      ...Object.fromEntries(GRAMMAR.filter((k) => s[k] !== undefined).map((k) => [k, s[k]])), prompt: "" })),
+      ...Object.fromEntries(GRAMMAR.filter((k) => s[k] !== undefined).map((k) => [k, s[k]])),
+      ...(own ? { sourceFrame: s.frame, ...(s.on_screen_text ? { onScreenText: s.on_screen_text } : {}) } : {}),
+      prompt: own && s.description ? s.description : "" })),
   };
   writeFileSync(join(out, "template.json"), `${JSON.stringify(template, null, 2)}\n`);
   const cell = (s, k) => (s[k] === undefined ? "" : String(s[k]));
@@ -475,6 +560,7 @@ function writeSpec(out, summary, shots) {
       `- Music: ${a.music ? `${a.music_genre}, ${a.music_mood}, about ${a.bpm_estimate} BPM, ${a.music_vocals ? "with" : "no"} vocals` : "none"}`,
       `- Sound effects: ${a.sfx ? "yes" : "no"} · Ending: ${a.ending}`] : ["- Not analysed (run with --analyze)."]),
     "",
+    ...(summary.ownContent ? ownSpecSections(summary, shots) : [
     "## 4b. What the reference says and shows (paraphrased; for understanding and contrast, never reuse)",
     ...(summary.content ? (() => { const c = summary.content; return [
       `- Message: ${c.messageSummary}`, `- Offers or claims: ${c.offersOrClaims.length ? c.offersOrClaims.join("; ") : "none"}`,
@@ -482,7 +568,11 @@ function writeSpec(out, summary, shots) {
       `- Brand: ${c.brand.name}. Positioning: ${c.brand.positioning}. Visual identity: ${c.brand.visualIdentity}`,
       "- Cast (archetypes only; ours must be clearly different):", ...c.characters.map((x) => `  - ${x.role} (${x.prominence}): ${x.archetype}`),
       "- On-screen text (purpose, not wording):", ...c.onScreenText.map((x) => `  - ${x.role}: ${x.purpose}`)]; })() : ["- Not analysed (run with --analyze)."]),
-    "",
+    ""]),
+    ...(summary.ownContent ? ["## 5. This version: what stays and what changes",
+      "- Keep: (characters, brand, voice, music, shots that stay as they are)",
+      "- Change: (offer, product, length, aspect, script lines, shots to replace)",
+      "- Slot prompts: template.json starts from each shot's description; edit only what this version changes", ""] : [
     "## 5. Our creative layer (write before building; describe nothing from the reference)",
     "- Brand: name, palette (hex), logo or wordmark, end-card copy",
     "- Characters: each one designed from scratch (shape, outfit, colours, style) and how it differs from anyone in the reference",
@@ -490,18 +580,22 @@ function writeSpec(out, summary, shots) {
     "- Script / voiceover lines (our words), with target words per second from part 4:",
     "- Music brief (generated fresh; genre, tempo and energy may follow part 4):",
     "- Text system: title, caption and deal/label styles (font, size, colours, positions) for the roles in part 3",
-    "- Slot prompts: fill `prompt` for every slot in template.json; keep each slot's timing and grammar from part 3", "",
+    "- Slot prompts: fill `prompt` for every slot in template.json; keep each slot's timing and grammar from part 3", ""]),
     "## 6. Production plan",
     "| Step | Model / tool | Seconds or count | Quote (USD) |", "|---|---|---|---|",
     "| Reference images (characters, sets) | GPT Image 2, 1K | TODO | TODO |",
     "| Video | Seedance (variant), grouped with --svml --group | TODO | TODO |",
     "| Music / voice | Lyria 3 / ElevenLabs preset voice via OpenRouter | TODO | TODO |",
     "| Render | Hypit on the server | - | 0 |", "",
+    ...(summary.ownContent ? ["## 7. Rights checklist (all must hold)",
+      "- [ ] We made this video or hold the rights to adapt it",
+      "- [ ] Licensed parts (stock footage, music, fonts) allow new versions",
+      "- [ ] Every real person shown or voiced has consented to new versions", ""] : [
     "## 7. Originality checklist (all must hold)",
     "- [ ] No reference frame, clip or audio is used as a generation input or appears in the output",
     "- [ ] No transcribed speech, lyrics or on-screen copy from the reference",
     "- [ ] Characters, brand, logo, slogan and music are our own designs",
-    "- [ ] Real brands, people and trademarks appear only if we own or are licensed to use them", "",
+    "- [ ] Real brands, people and trademarks appear only if we own or are licensed to use them", ""]),
     "## 8. Verification targets (check the render with tools/shot-list.mjs --metrics)",
     `- Duration ${summary.duration}s (within one frame)`,
     `- Shots ${within(summary.shots, 0.15)} · average shot ${within(summary.averageShot, 0.2)}s · first cut within 0.5s of ${v(summary.firstCut, "s")}`,
@@ -509,6 +603,26 @@ function writeSpec(out, summary, shots) {
     "",
   ];
   writeFileSync(join(out, "VIDEO_SPEC.md"), lines.join("\n"));
+}
+
+/** Own content: full description, transcript and per-shot copy, for faithful new versions. */
+function ownSpecSections(summary, shots) {
+  const c = summary.content;
+  const out = ["## 4b. Content (own video, full detail)"];
+  if (c) {
+    out.push(`- Message: ${c.messageSummary}`, `- Offers or claims: ${c.offersOrClaims.length ? c.offersOrClaims.join("; ") : "none"}`,
+      `- Call to action: ${c.callToAction} · Tone: ${c.tone}`, `- Music theme: ${c.musicTheme}`,
+      `- Brand: ${c.brand.name}${c.brand.tagline ? ` · Tagline: "${c.brand.tagline}"` : ""}`, `  - Positioning: ${c.brand.positioning}`, `  - Visual identity: ${c.brand.visualIdentity ?? c.brand.visual_identity}`,
+      "- Characters:", ...c.characters.map((x) => `  - ${x.name_or_role} (${x.prominence}): ${x.design}`));
+  } else {
+    out.push("- Not analysed (run with --analyze --own).");
+  }
+  out.push("", "## 4c. Transcript (own video)");
+  out.push(...(summary.transcriptLines?.length ? summary.transcriptLines.map((l) => `- ${l.start.toFixed(2)}s to ${l.end.toFixed(2)}s: ${l.text}`)
+    : ["- No transcript (no speech, or not analysed with --analyze --own). Full word timings: transcript.json."]));
+  out.push("", "## 4d. Shot descriptions and on-screen text (own video)", "| Slot | Description | On-screen text |", "|---|---|---|",
+    ...shots.map((s) => `| ${s.index} | ${String(s.description ?? "").replace(/\|/g, "/")} | ${String(s.on_screen_text ?? "").replace(/\|/g, "/")} |`), "");
+  return out;
 }
 
 /** Text safe inside an SVML text:Value body. */
@@ -604,6 +718,7 @@ function writeSvml(templatePath, outOption, groupSeconds) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.own) console.log("Own-content mode: transcripts, exact on-screen text and full designs. Use it only on video you own or are licensed to adapt.");
   if (options.svml !== undefined) return writeSvml(resolve(options.svml), options.out, options.group);
   const video = resolve(options.video);
   const out = resolve(options.out ?? `${basename(video, extname(video))}-shots`);
@@ -632,7 +747,7 @@ async function main() {
     console.log(`Labelling ${shots.length} shots with ${options.model}...`);
     analysis = await analyse(video, shots, info.fps, options);
     try {
-      analysis.content = await summariseContent(video, shots, options.model);
+      analysis.content = options.own ? await describeOwnContent(video, shots, options.model) : await summariseContent(video, shots, options.model);
       analysis.cost += analysis.content.cost;
     } catch (error) {
       analysis.contentError = error.message;
@@ -640,7 +755,7 @@ async function main() {
     }
     if (hasAudio(video)) {
       try {
-        analysis.audio = await analyseAudio(video, options.model);
+        analysis.audio = await analyseAudio(video, options.model, options.own);
         analysis.cost += analysis.audio.cost;
       } catch (error) {
         analysis.audioError = error.message;
@@ -653,7 +768,7 @@ async function main() {
   const record = shots.map((s) => ({
     shot: s.index, start: round(s.start), end: round(s.end), duration: round(s.duration),
     startTimecode: timecode(s.start, info.fps), endTimecode: timecode(s.end, info.fps), frameAt: round(s.frameAt), frame: s.frame,
-    ...(options.analyze ? Object.fromEntries([...Object.keys(SCHEMA.properties), "motion", "palette", "analysisError"]
+    ...(options.analyze ? Object.fromEntries([...Object.keys(SCHEMA.properties), "description", "on_screen_text", "motion", "palette", "analysisError"]
       .filter((k) => s[k] !== undefined).map((k) => [k, s[k]])) : {}),
   }));
   const durations = shots.map((s) => s.duration);
@@ -680,6 +795,14 @@ async function main() {
     });
   }
   if (metrics) summary.metrics = metrics;
+  if (options.own) summary.ownContent = true;
+  const transcript = analysis?.audio?.transcript;
+  if (transcript?.length) {
+    const lines = transcriptLines(transcript);
+    summary.transcriptLines = lines;
+    writeFileSync(join(out, "transcript.json"), `${JSON.stringify({ words: transcript, lines }, null, 2)}\n`);
+    writeFileSync(join(out, "transcript.srt"), lines.map((l, i) => `${i + 1}\n${srtTime(l.start)} --> ${srtTime(l.end)}\n${l.text}\n`).join("\n"));
+  }
 
   writeFileSync(join(out, "shots.json"), `${JSON.stringify({ summary, shots: record }, null, 2)}\n`);
   const extra = options.analyze ? ["beat", "shot_size", "angle", "camera_move", "subject", "person_on_screen", "lighting", "text_role", "text_position", "motion", "palette"] : [];
@@ -722,7 +845,8 @@ ${record.map((r) => `  <figure><img src="${r.frame}" alt="Shot ${r.shot}" loadin
   }
   if (summary.audio) console.log(`Audio: ${JSON.stringify(summary.audio)}${summary.speechPace ? ` · ${summary.speechPace.wordsPerSecond} words/s` : ""}`);
   if (analysis) console.log(`Labelled ${shots.length - analysis.failures}/${shots.length} shots${analysis.audio ? " and the audio" : ""} for $${analysis.cost.toFixed(4)}.`);
-  const written = ["shots.json", "shots.csv", "frames/", "contact-sheet.jpg", "index.html", ...(options.template ? ["template.json", "template.md"] : []), ...(options.spec ? ["VIDEO_SPEC.md"] : [])];
+  const written = ["shots.json", "shots.csv", "frames/", "contact-sheet.jpg", "index.html", ...(transcript?.length ? ["transcript.json", "transcript.srt"] : []),
+    ...(options.template ? ["template.json", "template.md"] : []), ...(options.spec ? ["VIDEO_SPEC.md"] : [])];
   console.log(`Wrote ${out}/ (${written.join(", ")})`);
   if (analysis?.failures || analysis?.audioError || analysis?.contentError) process.exitCode = 2;
 }

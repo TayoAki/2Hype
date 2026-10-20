@@ -1,6 +1,6 @@
 ---
 name: video-remake
-description: "Study any reference video, document its format into VIDEO_SPEC.md, then produce an original video in the same format with Hypit. Three-phase workflow: analyze → spec → build. Never builds from memory; never copies the reference's footage, words, music, characters or branding."
+description: "Study any reference video, document it into VIDEO_SPEC.md, then produce a new video with Hypit. Three-phase workflow: analyze → spec → build. Someone else's video: copy its format only, never its footage, words, music, characters or branding. The user's own video (--own): full transcript, copy and designs, and its material may be reused to make new versions."
 user-invocable: true
 ---
 
@@ -26,14 +26,31 @@ The reference's content is recorded only as a short **paraphrased summary** (mes
 brand positioning, cast archetypes, purpose of each on-screen text) so we understand it and can make ours
 clearly different. Never write verbatim transcripts, song lyrics or exact on-screen copy into the spec, never
 describe a character in enough detail to recreate it, and never feed reference frames, clips or audio into a
-generator. If the user asks for a shot-for-shot or near-identical copy, decline that part and offer this workflow
-or a re-edit of footage they own.
+generator. If the user asks for a shot-for-shot or near-identical copy of someone else's video, decline that part and offer
+this workflow or a re-edit of footage they own.
+
+### Own content (`--own`)
+
+When the reference is the user's own video (they made it or hold the rights to adapt it), the rules above relax:
+
+- Phase 1 keeps the full transcript with word timings (`transcript.json`, `transcript.srt`), each shot's exact
+  on-screen text and a detailed description, and full character and brand designs including the tagline.
+- `template.json` starts every slot prompt from its shot description and lists the shot's source frame, so a new
+  version only edits what changes.
+- Phase 3 may reuse the original material: re-cut its footage, use its frames as Seedance references, reuse its
+  music, and clone the user's own voice (with consent) through HypiHub's voice clone.
+
+Take the user's word, within reason: if a file is plainly someone else's (another company's logo and ad, a
+celebrity, a well-known character), treat it as third-party whatever it is called. Licensed parts keep their
+terms: stock footage, fonts and especially licensed music. A transcript can pick up sung lyrics from licensed
+tracks; do not reuse those or paste them anywhere. Every real person shown or voiced must have consented.
 
 ## Inputs
 
 Ask for these before starting (or take them from the user's message):
 
-1. **Reference video**: a URL or a file. Instagram and TikTok usually download on the server; YouTube blocks
+1. **Reference video and whose it is**: a URL or a file, and whether it is the user's own (use `--own`) or
+   someone else's. Instagram and TikTok usually download on the server; YouTube blocks
    data-centre addresses, so ask the user to upload the file (give them a `file_link` upload command). Never ask
    for cookies or passwords.
 2. **Project name** on the Hypit server (new, lowercase).
@@ -55,12 +72,20 @@ hypit download <url> --to references/source.mp4        # or the user's upload at
 node /app/tools/shot-list.mjs references/source.mp4 --out analysis/reference --analyze --spec
 ```
 
+For the user's own video add `--own`:
+
+```bash
+node /app/tools/shot-list.mjs references/source.mp4 --out analysis/reference --analyze --own --spec
+```
+
 This writes, under `analysis/reference/`:
 
 - `shots.json`, `shots.csv`: every cut with timecodes, plus per-shot labels, motion and palette
 - `frames/`, `contact-sheet.jpg`, `index.html`: one frame per shot, for the human reviewing the analysis
 - `template.json`, `template.md`: the slot structure with an empty `prompt` per slot
 - `VIDEO_SPEC.md`: parts 1-4 and 4b filled with measured values; parts 5-7 left for us
+- with `--own`: `transcript.json` and `transcript.srt`, spec parts 4c (transcript) and 4d (shot descriptions and
+  exact on-screen text), and prompts prefilled in `template.json`
 
 Costs about $0.01 with `google/gemini-2.5-flash`. Without credits, drop `--analyze`: cuts, metrics and the
 spec skeleton are free and need no key.
@@ -91,7 +116,11 @@ Check the analysis before moving on:
      template-level `"style"` line and `"references"` for character and set sheets (see Phase 3).
 3. **Part 6, production plan**: models, seconds and quotes. Group slots into multi-shot clips (`--group 15`);
    Seedance bills at least 4 seconds per clip, so one clip per short slot can cost two to three times as much.
-4. **Part 7, originality checklist**: tick every box before any paid step.
+4. **Part 7, originality checklist** (or, with `--own`, the rights checklist): tick every box before any paid step.
+
+With `--own`, part 5 is "what stays and what changes": list what this version keeps (characters, brand, voice,
+music, shots) and what it changes (offer, product, length, aspect, lines, shots to replace), then edit only the
+affected slot prompts.
 
 ---
 
@@ -166,6 +195,13 @@ Known gaps: {anything not matched, substituted or covered}
 
 ---
 
+## Testing the tool without credits
+
+`OPENROUTER_BASE_URL` points `tools/shot-list.mjs` at any OpenRouter-compatible server. A small local mock that
+answers `/chat/completions` by `response_format.json_schema.name` (`shot_labels`, `own_shot_labels`,
+`audio_labels`, `content_summary`, `own_content`) and `/audio/transcriptions` with a `words` array exercises the
+whole `--analyze --spec` path, with and without `--own`, at no cost.
+
 ## Error handling and lessons
 
 - **Every window must end inside the timeline.** A window `from` plus a media extent that overruns `end` fails the
@@ -191,4 +227,5 @@ Known gaps: {anything not matched, substituted or covered}
 
 | Date | Changes |
 | --- | --- |
+| 2026-10-20 | Own-content mode (`--own`): transcript, exact on-screen text, shot descriptions, full designs, prefilled prompts, rights checklist. Dropped connections are retried; `OPENROUTER_BASE_URL` for mock testing. |
 | 2026-10-20 | Initial version, from the Budapest reel, Pepper Lane ad and couple-formula builds: measured-format spec, paraphrased content summary, grouped multi-shot Seedance clips, verification against measured targets, and the failure lessons above. |
