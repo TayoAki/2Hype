@@ -12,13 +12,17 @@ server added, so Claude can produce Hypit videos on a hosted machine instead of 
 ## What this fork adds
 
 - `mcp-server/` is the MCP server. Its [README](mcp-server/README.md) lists the tools and settings.
+- `packages/provider-openrouter/` is a Hypit Provider for OpenRouter's video and image APIs. It is a
+  default Distribution package, so projects can select it without installing anything. Its
+  [README](packages/provider-openrouter/README.md) lists the models, settings and limits.
 - `Dockerfile` and `railway.json` build one image with Hypit, FFmpeg, uv, Chrome dependencies and
   the MCP server, ready for Railway.
 - `.mcp.json` registers the hosted server for Claude Code sessions opened in this repository.
 - `.github/workflows/mcp-server.yml` type-checks, builds and tests the server.
 - The upstream `sync-hypihub-docs` workflow is removed, since it pushes to Hypit's docs site.
 
-Everything else is upstream Hypit, unchanged.
+Outside those, the only upstream files touched are the two manifests that register the OpenRouter
+package, `package.json` and `packages/video/package.json`, plus `pnpm-lock.yaml`.
 
 ## Current deployment
 
@@ -39,7 +43,9 @@ Everything else is upstream Hypit, unchanged.
 | Variable | Value |
 | --- | --- |
 | `MCP_AUTH_TOKEN` | A long random string, e.g. from `openssl rand -hex 32` |
-| `HYPIT_HUB_API_KEY` | Your HypiHub API key, if you use HypiHub for generation and alignment |
+| `OPENROUTER_API_KEY` | Your OpenRouter API key, for Seedance, Grok Imagine, MiniMax H3, GPT Image 2 and Nano Banana |
+| `OPENROUTER_GPT_IMAGE_QUALITY` | Optional: `low`, `medium` (default) or `high` for GPT Image 2 |
+| `HYPIT_HUB_API_KEY` | Your HypiHub API key, if you also use HypiHub for voices, alignment or matting |
 | `HYPIT_RENDER_WORKERS` | Chrome workers per render, e.g. `2` on a small instance |
 
 Rendering runs headless Chrome and FFmpeg, so give the service at least 2 vCPU and 4 GB of memory.

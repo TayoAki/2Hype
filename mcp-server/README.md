@@ -28,7 +28,9 @@ plus notes on how its local-shell steps map onto these tools.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MCP_AUTH_TOKEN` | required | Shared secret, at least 24 characters. Clients send it as `Authorization: Bearer <token>` or in the path as `/mcp/<token>`. |
-| `HYPIT_HUB_API_KEY` | unset | HypiHub API key. New projects read it through Hypit's env credential store. |
+| `OPENROUTER_API_KEY` | unset | OpenRouter API key. New projects route Seedance, Grok Imagine, MiniMax H3, GPT Image 2 and Nano Banana through `@hypit/provider-openrouter`. |
+| `OPENROUTER_GPT_IMAGE_QUALITY` | `medium` | `auto`, `low`, `medium` or `high` for GPT Image 2 through OpenRouter. It sets that model's price. |
+| `HYPIT_HUB_API_KEY` | unset | HypiHub API key, for voices, hosted alignment, matting and models OpenRouter lacks. |
 | `HYPIT_RENDER_WORKERS` | unset | Browser workers for local HTML rendering in new projects. Match it to the machine size. |
 | `PUBLIC_BASE_URL` | Railway domain | Base URL used in signed file links. |
 | `MCP_SIGNING_SECRET` | the auth token | Separate key for signed links, if you want to rotate them independently. |

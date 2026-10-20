@@ -18,6 +18,7 @@ import {
   toPosix,
   UserError,
 } from "./paths.js";
+import { adaptProfile } from "./profile.js";
 import { REMOTE_NOTES } from "./remote-notes.js";
 import { signedFileUrl } from "./signing.js";
 
@@ -148,37 +149,6 @@ function shellQuote(arg: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
-async function patchProfile(dir: string): Promise<string[]> {
-  const profilePath = join(dir, "hypit.runtime.json");
-  if (!existsSync(profilePath)) return ["No hypit.runtime.json was written; inspect the init output."];
-  const profile = JSON.parse(await readFile(profilePath, "utf8"));
-  const notes: string[] = [];
-  profile.credentials ??= {};
-  if (!profile.credentials.env) {
-    profile.credentials.env = { use: "@hypit/credential-store-env" };
-    notes.push('Added the "env" credential store so Endpoints can read Railway variables.');
-  }
-  const hub = profile.endpoints?.["hypihub.default"];
-  if (hub && process.env.HYPIT_HUB_API_KEY) {
-    hub.config ??= {};
-    hub.config.apiKey = { store: "env", key: "HYPIT_HUB_API_KEY" };
-    notes.push("hypihub.default reads its API key from the HYPIT_HUB_API_KEY variable.");
-  } else if (hub) {
-    notes.push(
-      "HYPIT_HUB_API_KEY is not set on the server, so hypihub.default still points at the local store. Ask the user to add the variable in Railway, then rerun project_create or edit the Profile.",
-    );
-  }
-  const html = profile.endpoints?.["html.local"];
-  if (html && config.renderWorkers) {
-    html.config ??= {};
-    html.config.workers ??= config.renderWorkers;
-    html.config.browserCapacity ??= config.renderWorkers;
-    notes.push(`html.local renders with ${config.renderWorkers} browser workers (HYPIT_RENDER_WORKERS).`);
-  }
-  await writeFile(profilePath, `${JSON.stringify(profile, null, 2)}\n`);
-  return notes;
-}
-
 export function registerHypitTools(server: McpServer, baseUrl: string): void {
   const hypitLauncher = join(config.hypitHome, "bin", "hypit.mjs");
 
@@ -270,7 +240,7 @@ export function registerHypitTools(server: McpServer, baseUrl: string): void {
     {
       title: "Create a video project",
       description:
-        "Create a Hypit project on the server (package.json with hypit.project=true), run `hypit runtime init`, and adapt the Runtime Profile to this server: an env credential store, HYPIT_HUB_API_KEY for HypiHub when set, and the configured render worker count. Safe to rerun on an existing project; it keeps existing files.",
+        "Create a Hypit project on the server (package.json with hypit.project=true), run `hypit runtime init`, and adapt the Runtime Profile to this server: an env credential store, OpenRouter (bound for Seedance, Grok Imagine, MiniMax H3, GPT Image 2 and Nano Banana) when OPENROUTER_API_KEY is set, HypiHub's key when HYPIT_HUB_API_KEY is set, and the configured render worker count. Safe to rerun on an existing project; it keeps existing files.",
       inputSchema: {
         name: z.string().describe("Project folder name: lowercase letters, digits, '.', '_' or '-'"),
         description: z.string().optional().describe("Optional one-line description stored in package.json"),
@@ -296,7 +266,7 @@ export function registerHypitTools(server: McpServer, baseUrl: string): void {
       const init = hadProfile
         ? { output: "Kept the existing hypit.runtime.json (runtime init skipped)." }
         : await runProcess(process.execPath, [hypitLauncher, "runtime", "init"], { cwd: dir, timeoutSeconds: 120 });
-      const notes = await patchProfile(dir);
+      const notes = await adaptProfile(dir, { env: process.env, renderWorkers: config.renderWorkers });
       const profile = existsSync(join(dir, "hypit.runtime.json"))
         ? await readFile(join(dir, "hypit.runtime.json"), "utf8")
         : "(missing)";
