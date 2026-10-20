@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Shot list for any video: cut points, one frame per shot, a contact sheet and a storyboard page.
-// Optional: label each shot's visual grammar (--analyze), export a structure-only pacing template
-// (--template), and turn a filled template into a Hypit project that generates new shots (--svml).
+// Optional: measure picture and sound (--metrics), label each shot's grammar and the audio structure (--analyze),
+// export a structure-only pacing template (--template), write a VIDEO_SPEC.md format spec (--spec), and turn a
+// filled template into a Hypit project that generates new shots (--svml). Used by the video-remake skill.
 // Needs ffmpeg and ffprobe on PATH; --analyze also needs OPENROUTER_API_KEY. No npm dependencies.
 //
 //   node tools/shot-list.mjs <video> [--out <dir>] [--threshold 0.3] [--min-shot 0.25]
-//                            [--frame middle|first|last] [--width 540] [--columns 6]
-//                            [--analyze [--model google/gemini-2.5-flash] [--concurrency 2]] [--template]
-//   node tools/shot-list.mjs --svml <filled-template.json> [--out <dir>]
+//                            [--frame middle|first|last] [--width 540] [--columns 6] [--metrics]
+//                            [--analyze [--model google/gemini-2.5-flash] [--concurrency 2]] [--template] [--spec]
+//   node tools/shot-list.mjs --svml <filled-template.json> [--group 15] [--out <dir>]
 //
 // Writes into <dir> (default: <video name>-shots/):
 //   shots.json, shots.csv   start, end, duration, timecodes and frame file for every shot (plus labels)
@@ -15,18 +16,26 @@
 //   contact-sheet.jpg       every frame in a grid
 //   index.html              storyboard with timecodes (and labels), opens in any browser
 //   template.json/.md       with --template: timing and shot grammar only, one empty prompt per slot
+//   VIDEO_SPEC.md           with --spec: every measured value, plus empty sections for your own creative layer
 //
 // Detection uses ffmpeg's scene-change score (0-1). Lower --threshold finds softer cuts and also more
 // false cuts; raise it for footage with fast motion or flashes. Dissolves and fades are not hard cuts and
 // may be missed; cuts closer together than --min-shot seconds are merged.
 //
+// --metrics measures loudness (LUFS, true peak), brightness, saturation, contrast, frame-to-frame motion and
+// cuts per five seconds with ffmpeg alone.
+//
 // --analyze labels grammar, not content: shot size, angle, camera move, subject type, lighting, beat role and
-// where on-screen text sits. It never transcribes on-screen words or describes who is in the shot. Motion
-// and the colour palette are measured locally from the pixels.
+// where on-screen text sits, plus the audio's structure (voiceover, voice type, music genre, tempo, ending) and
+// speech pace, and a paraphrased content summary: message, offers, call to action, brand positioning, cast
+// archetypes and what each piece of on-screen text conveys. It keeps no transcript, lyrics or verbatim copy and no
+// detailed character designs. Motion and the colour palette are measured locally from the pixels.
 //
 // --template keeps only the structure (slot timing plus those labels). Each slot gets an empty "prompt" for
-// your own subject; --svml then writes main.svml, main.svrun and look.svs that generate one new Seedance clip per slot.
-// Run `hypit pricing main.svrun` before building: Seedance bills at least 4 seconds per clip.
+// your own subject. --svml writes main.svml, main.svrun and look.svs that generate new Seedance clips; with
+// --group <seconds> neighbouring slots share one multi-shot clip, because Seedance bills at least 4 seconds per
+// clip. A template may add "style" (text prepended to every clip) and "references" ([{ "path", "role",
+// "personReference" }], project-relative images). Run `hypit pricing main.svrun` before building.
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -47,22 +56,22 @@ const LABELS = {
 function usage(message) {
   if (message) console.error(`shot-list: ${message}\n`);
   console.error("Usage: node tools/shot-list.mjs <video> [--out <dir>] [--threshold 0.3] [--min-shot 0.25]\n" +
-    "                     [--frame middle|first|last] [--width 540] [--columns 6]\n" +
-    "                     [--analyze [--model <openrouter model>] [--concurrency 2]] [--template]\n" +
-    "       node tools/shot-list.mjs --svml <filled-template.json> [--out <dir>]");
+    "                     [--frame middle|first|last] [--width 540] [--columns 6] [--metrics]\n" +
+    "                     [--analyze [--model <openrouter model>] [--concurrency 2]] [--template] [--spec]\n" +
+    "       node tools/shot-list.mjs --svml <filled-template.json> [--group 15] [--out <dir>]");
   process.exit(message ? 1 : 0);
 }
 
 function parseArgs(argv) {
   const options = { threshold: 0.3, minShot: 0.25, frame: "middle", width: 540, columns: 6,
-    analyze: false, template: false, model: "google/gemini-2.5-flash", concurrency: 2 };
+    analyze: false, template: false, metrics: false, spec: false, model: "google/gemini-2.5-flash", concurrency: 2, group: 0 };
   const values = { "--out": "out", "--threshold": "threshold", "--min-shot": "minShot", "--frame": "frame", "--width": "width",
-    "--columns": "columns", "--model": "model", "--concurrency": "concurrency", "--svml": "svml" };
+    "--columns": "columns", "--model": "model", "--concurrency": "concurrency", "--svml": "svml", "--group": "group" };
   const strings = new Set(["out", "frame", "model", "svml"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") usage();
-    if (arg === "--analyze" || arg === "--template") {
+    if (["--analyze", "--template", "--metrics", "--spec"].includes(arg)) {
       options[arg.slice(2)] = true;
     } else if (values[arg]) {
       const value = argv[++i];
@@ -78,6 +87,7 @@ function parseArgs(argv) {
   }
   if (options.svml !== undefined) {
     if (options.video !== undefined) usage("--svml takes a template, not a video");
+    if (!(options.group === 0 || (Number.isInteger(options.group) && options.group >= 4 && options.group <= 15))) usage("--group must be 0 or 4 to 15 seconds");
     return options;
   }
   if (!options.video) usage("a video file is required");
@@ -88,6 +98,7 @@ function parseArgs(argv) {
   if (!(Number.isInteger(options.columns) && options.columns >= 1)) usage("--columns must be a whole number");
   if (!(Number.isInteger(options.concurrency) && options.concurrency >= 1)) usage("--concurrency must be a whole number");
   if (options.analyze && !process.env.OPENROUTER_API_KEY) usage("--analyze needs the OPENROUTER_API_KEY environment variable");
+  if (options.spec) options.template = options.metrics = true;
   return options;
 }
 
@@ -219,18 +230,21 @@ Return only the labels. Do not transcribe on-screen words, name people or brands
     response_format: { type: "json_schema", json_schema: { name: "shot_labels", strict: true, schema: SCHEMA } },
     temperature: 0,
   };
+  const json = await postOpenRouter(OPENROUTER, body);
+  const content = json.choices?.[0]?.message?.content ?? "";
+  const labels = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1));
+  for (const [key, allowed] of Object.entries(LABELS)) {
+    if (key in labels && !allowed.includes(labels[key])) throw new Error(`model returned ${key}=${labels[key]}`);
+  }
+  return { labels, cost: json.usage?.cost ?? 0 };
+}
+
+async function postOpenRouter(url, body) {
   for (let attempt = 1; ; attempt++) {
-    const response = await fetch(OPENROUTER, { method: "POST", body: JSON.stringify(body),
+    const response = await fetch(url, { method: "POST", body: JSON.stringify(body),
       headers: { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`, "content-type": "application/json" } });
     const json = await response.json().catch(() => ({}));
-    if (response.ok) {
-      const content = json.choices?.[0]?.message?.content ?? "";
-      const labels = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1));
-      for (const [key, allowed] of Object.entries(LABELS)) {
-        if (key in labels && !allowed.includes(labels[key])) throw new Error(`model returned ${key}=${labels[key]}`);
-      }
-      return { labels, cost: json.usage?.cost ?? 0 };
-    }
+    if (response.ok) return json;
     if (attempt >= 6 || ![408, 429, 500, 502, 503, 504].includes(response.status)) {
       throw new Error(`OpenRouter HTTP ${response.status}: ${json.error?.message ?? "no message"}`);
     }
@@ -271,6 +285,137 @@ function tally(shots, key) {
   return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1]));
 }
 
+// ---------- metrics ----------
+
+function hasAudio(video) {
+  return run("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", video]).stdout.trim() !== "";
+}
+
+const median = (values) => { const v = [...values].sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : null; };
+const percentile = (values, p) => { const v = [...values].sort((a, b) => a - b); return v.length ? v[Math.min(v.length - 1, Math.floor(v.length * p))] : null; };
+const mean = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
+
+/** Loudness, picture statistics and pacing, measured with ffmpeg alone. */
+function measureMetrics(video, shots, info) {
+  const metrics = {};
+  if (hasAudio(video)) {
+    const { stderr } = run("ffmpeg", ["-hide_banner", "-nostats", "-i", video, "-vn", "-af", "loudnorm=print_format=json", "-f", "null", "-"]);
+    const loud = JSON.parse(stderr.slice(stderr.lastIndexOf("{"), stderr.lastIndexOf("}") + 1));
+    Object.assign(metrics, { loudnessLufs: Number(loud.input_i), truePeakDb: Number(loud.input_tp), loudnessRangeLu: Number(loud.input_lra) });
+  }
+  const { stdout } = run("ffmpeg", ["-hide_banner", "-v", "error", "-i", video, "-an", "-vf", "scale=320:-2,signalstats,metadata=print:file=-", "-f", "null", "-"]);
+  const frames = [];
+  for (const line of stdout.split("\n")) {
+    const time = /pts_time:([0-9.]+)/.exec(line);
+    if (time) { frames.push({ t: Number(time[1]) }); continue; }
+    const stat = /lavfi\.signalstats\.(\w+)=([0-9.]+)/.exec(line);
+    if (stat && frames.length) frames.at(-1)[stat[1]] = Number(stat[2]);
+  }
+  // A cut's first frame differs from the last frame of the previous shot; leave those out of motion.
+  const cutFrames = shots.slice(1).map((s) => s.start);
+  const moving = frames.slice(1).filter((f) => !cutFrames.some((c) => f.t >= c - 0.5 / info.fps && f.t < c + 1.5 / info.fps)).map((f) => f.YDIF);
+  const span = 5, buckets = Array.from({ length: Math.ceil(info.duration / span) }, () => 0);
+  for (const shot of shots) buckets[Math.min(buckets.length - 1, Math.floor(shot.start / span))]++;
+  Object.assign(metrics, {
+    brightness: round(mean(frames.map((f) => f.YAVG))), saturation: round(mean(frames.map((f) => f.SATAVG))),
+    contrast: round(mean(frames.map((f) => f.YHIGH - f.YLOW))),
+    motionMedian: round(median(moving)), motionP90: round(percentile(moving, 0.9)),
+    cutsPerSecond: round((shots.length - 1) / info.duration), shotsPerFiveSeconds: buckets,
+  });
+  return metrics;
+}
+
+const AUDIO_LABELS = {
+  voice_gender: ["female", "male", "mixed", "none"], voice_age: ["child", "young-adult", "adult", "older", "none"],
+  voice_energy: ["calm", "warm", "upbeat", "high", "none"], ending: ["button", "fade", "hard-cut", "voiceover-tag", "silence", "other"],
+};
+const AUDIO_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["voiceover", "voice_gender", "voice_age", "voice_energy", "music", "music_vocals", "music_genre", "music_mood", "bpm_estimate", "sfx", "ending"],
+  properties: {
+    voiceover: { type: "boolean" }, music: { type: "boolean" }, music_vocals: { type: "boolean" }, sfx: { type: "boolean" },
+    music_genre: { type: "string" }, music_mood: { type: "string" }, bpm_estimate: { type: "number" },
+    ...Object.fromEntries(Object.entries(AUDIO_LABELS).map(([k, values]) => [k, { type: "string", enum: values }])),
+  },
+};
+
+/** Audio structure labels and, when there is speech, its pace. No transcript is kept. */
+async function analyseAudio(video, model) {
+  const mp3 = run("ffmpeg", ["-hide_banner", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", "-f", "mp3", "-"], "buffer").stdout;
+  const data = mp3.toString("base64");
+  const text = `Label the structure of this advert or short-video soundtrack for an editor's format study.
+music_genre and music_mood are at most three words each. bpm_estimate is the music tempo (0 if there is no music).
+Do not transcribe speech or lyrics, and do not name songs, artists, people or brands.`;
+  const json = await postOpenRouter(OPENROUTER, { model, temperature: 0,
+    messages: [{ role: "user", content: [{ type: "text", text }, { type: "input_audio", input_audio: { data, format: "mp3" } }] }],
+    response_format: { type: "json_schema", json_schema: { name: "audio_labels", strict: true, schema: AUDIO_SCHEMA } } });
+  const content = json.choices?.[0]?.message?.content ?? "";
+  const labels = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1));
+  let cost = json.usage?.cost ?? 0, pace = null;
+  if (labels.voiceover) {
+    const stt = await postOpenRouter("https://openrouter.ai/api/v1/audio/transcriptions", { model: "elevenlabs/scribe-v2",
+      input_audio: { data, format: "mp3" }, response_format: "verbose_json", timestamp_granularities: ["word"] });
+    const words = (stt.words ?? []).filter((w) => (w.type ?? "word") === "word" && String(w.word).trim());
+    if (words.length) {
+      const gaps = words.slice(1).map((w, i) => w.start - words[i].end);
+      const spoken = words.at(-1).end - words[0].start;
+      pace = { words: words.length, speechStart: round(words[0].start), speechEnd: round(words.at(-1).end),
+        wordsPerSecond: round(words.length / spoken), pausesOver300ms: gaps.filter((g) => g > 0.3).length, longestPause: round(Math.max(0, ...gaps)) };
+    }
+    cost += stt.usage?.cost ?? 0;
+  }
+  return { labels, pace, cost };
+}
+
+const CONTENT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["message_summary", "offers_or_claims", "call_to_action", "tone", "brand", "characters", "on_screen_text", "music_theme"],
+  properties: {
+    message_summary: { type: "string" }, call_to_action: { type: "string" }, tone: { type: "string" }, music_theme: { type: "string" },
+    offers_or_claims: { type: "array", items: { type: "string" } },
+    brand: { type: "object", additionalProperties: false, required: ["name", "positioning", "visual_identity"],
+      properties: { name: { type: "string" }, positioning: { type: "string" }, visual_identity: { type: "string" } } },
+    characters: { type: "array", items: { type: "object", additionalProperties: false, required: ["role", "archetype", "prominence"],
+      properties: { role: { type: "string" }, archetype: { type: "string" }, prominence: { type: "string", enum: ["lead", "supporting", "background"] } } } },
+    on_screen_text: { type: "array", items: { type: "object", additionalProperties: false, required: ["role", "purpose"],
+      properties: { role: { type: "string", enum: LABELS.text_role }, purpose: { type: "string" } } } },
+  },
+};
+
+/** Clip a free-text field to a word budget so summaries stay summaries. */
+const words = (text, limit) => String(text ?? "").split(/\s+/).filter(Boolean).slice(0, limit).join(" ");
+
+/**
+ * What the reference says and shows, paraphrased: message, offers, call to action, brand positioning, cast archetypes
+ * and the purpose of its on-screen text. For understanding and contrast; it holds no transcript, lyrics or copy.
+ */
+async function summariseContent(video, shots, model) {
+  const mp3 = hasAudio(video) ? run("ffmpeg", ["-hide_banner", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", "-f", "mp3", "-"], "buffer").stdout : null;
+  const picks = shots.length <= 8 ? shots : Array.from({ length: 8 }, (_, i) => shots[Math.round((i * (shots.length - 1)) / 7)]);
+  const frames = picks.map((s) => grab(video, (s.start + s.end) / 2, "scale=384:-2", "jpeg"));
+  const text = `Summarise this short video for a producer planning an original video of their own in the same genre.
+Paraphrase everything in your own words. Never quote speech, lyrics or on-screen text word for word, and keep each
+item short: message_summary at most 60 words, each offer or claim at most 12 words, call_to_action at most 12 words,
+tone at most 5 words, brand positioning and visual identity at most 25 words each, music_theme at most 15 words.
+Describe characters only at the level of role and archetype (at most 12 words each, no detailed design), so the
+producer can make sure their own cast is clearly different. For on-screen text give its role and what it conveys,
+not its wording. The images are frames from across the video, in order.`;
+  const content = [{ type: "text", text }, ...frames.map((jpeg) => ({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpeg.toString("base64")}` } })),
+    ...(mp3 ? [{ type: "input_audio", input_audio: { data: mp3.toString("base64"), format: "mp3" } }] : [])];
+  const json = await postOpenRouter(OPENROUTER, { model, temperature: 0, messages: [{ role: "user", content }],
+    response_format: { type: "json_schema", json_schema: { name: "content_summary", strict: true, schema: CONTENT_SCHEMA } } });
+  const raw = json.choices?.[0]?.message?.content ?? "";
+  const c = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+  const summary = {
+    messageSummary: words(c.message_summary, 60), offersOrClaims: c.offers_or_claims.slice(0, 6).map((o) => words(o, 12)),
+    callToAction: words(c.call_to_action, 12), tone: words(c.tone, 5), musicTheme: words(c.music_theme, 15),
+    brand: { name: words(c.brand.name, 6), positioning: words(c.brand.positioning, 25), visualIdentity: words(c.brand.visual_identity, 25) },
+    characters: c.characters.slice(0, 8).map((x) => ({ role: words(x.role, 6), archetype: words(x.archetype, 12), prominence: x.prominence })),
+    onScreenText: c.on_screen_text.slice(0, 8).map((x) => ({ role: LABELS.text_role.includes(x.role) ? x.role : "label", purpose: words(x.purpose, 12) })),
+  };
+  return { summary, cost: json.usage?.cost ?? 0 };
+}
+
 // ---------- template ----------
 
 const GRAMMAR = ["beat", "shot_size", "angle", "camera_move", "person_on_screen", "text_role", "text_position"];
@@ -296,16 +441,88 @@ function writeTemplate(out, summary, shots) {
   ].join("\n"));
 }
 
+function writeSpec(out, summary, shots) {
+  const m = summary.metrics ?? {}, a = summary.audio, pace = summary.speechPace;
+  const v = (value, unit = "") => (value === undefined || value === null ? "not measured" : `${value}${unit}`);
+  const cell = (s, k) => (s[k] === undefined ? "" : String(s[k]));
+  const within = (value, share) => `${round(value * (1 - share))} to ${round(value * (1 + share))}`;
+  const lines = [
+    `# Video spec: ${summary.video}`, "",
+    "Single source of truth for the remake. Parts 1 to 4 are measured from the reference and copied exactly; parts 5 to 7",
+    "are ours and describe none of the reference's content. The builder works from this file and never from the reference.", "",
+    "## 1. Overview",
+    `- Reference: ${summary.video} (${summary.duration}s, ${summary.resolution}, ${summary.fps} fps, ${summary.aspectRatio})`,
+    "- Our video's purpose: TODO (one line)",
+    "- Budget cap (USD): TODO. Run `hypit pricing` before every paid step and stop if the quote exceeds it.", "",
+    "## 2. Format tokens (measured)",
+    "| Token | Value |", "|---|---|",
+    `| Duration | ${summary.duration}s |`, `| Frame | ${summary.resolution}, ${summary.aspectRatio}, ${summary.fps} fps |`,
+    `| Shots | ${summary.shots} |`, `| Average shot | ${summary.averageShot}s |`, `| Shortest / longest shot | ${summary.shortestShot}s / ${summary.longestShot}s |`,
+    `| First cut | ${v(summary.firstCut, "s")} |`, `| Cuts per second | ${v(m.cutsPerSecond)} |`,
+    `| Shots starting per 5 s | ${m.shotsPerFiveSeconds ? m.shotsPerFiveSeconds.join(", ") : "not measured"} |`,
+    `| Motion (median / p90 frame difference) | ${v(m.motionMedian)} / ${v(m.motionP90)} |`,
+    `| Brightness / saturation / contrast | ${v(m.brightness)} / ${v(m.saturation)} / ${v(m.contrast)} |`,
+    `| Loudness / true peak / range | ${v(m.loudnessLufs, " LUFS")} / ${v(m.truePeakDb, " dBTP")} / ${v(m.loudnessRangeLu, " LU")} |`,
+    ...(summary.personOnScreenShare !== undefined ? [`| Shots with a person / with on-screen text | ${Math.round(summary.personOnScreenShare * 100)}% / ${Math.round(summary.textOverlayShare * 100)}% |`] : []),
+    "",
+    "## 3. Beat map (measured)",
+    "| Slot | Start | Length | Beat | Size | Angle | Move | Subject type | Person | Text (role, position) |", "|---|---|---|---|---|---|---|---|---|---|",
+    ...shots.map((s) => `| ${s.index} | ${s.start.toFixed(2)}s | ${s.duration.toFixed(2)}s | ${cell(s, "beat")} | ${cell(s, "shot_size")} | ${cell(s, "angle")} | ${cell(s, "camera_move")} | ${cell(s, "subject")} | ${cell(s, "person_on_screen")} | ${s.text_role && s.text_role !== "none" ? `${s.text_role}, ${s.text_position}` : ""} |`),
+    "",
+    "## 4. Audio structure (measured)",
+    ...(a ? [`- Voiceover: ${a.voiceover ? `yes (${a.voice_gender}, ${a.voice_age}, ${a.voice_energy})` : "no"}`,
+      `- Speech pace: ${pace ? `${pace.words} words over ${round(pace.speechEnd - pace.speechStart)}s, ${pace.wordsPerSecond} words/s, ${pace.pausesOver300ms} pauses over 0.3s, longest ${pace.longestPause}s` : "no speech"}`,
+      `- Music: ${a.music ? `${a.music_genre}, ${a.music_mood}, about ${a.bpm_estimate} BPM, ${a.music_vocals ? "with" : "no"} vocals` : "none"}`,
+      `- Sound effects: ${a.sfx ? "yes" : "no"} · Ending: ${a.ending}`] : ["- Not analysed (run with --analyze)."]),
+    "",
+    "## 4b. What the reference says and shows (paraphrased; for understanding and contrast, never reuse)",
+    ...(summary.content ? (() => { const c = summary.content; return [
+      `- Message: ${c.messageSummary}`, `- Offers or claims: ${c.offersOrClaims.length ? c.offersOrClaims.join("; ") : "none"}`,
+      `- Call to action: ${c.callToAction} · Tone: ${c.tone}`, `- Music theme: ${c.musicTheme}`,
+      `- Brand: ${c.brand.name}. Positioning: ${c.brand.positioning}. Visual identity: ${c.brand.visualIdentity}`,
+      "- Cast (archetypes only; ours must be clearly different):", ...c.characters.map((x) => `  - ${x.role} (${x.prominence}): ${x.archetype}`),
+      "- On-screen text (purpose, not wording):", ...c.onScreenText.map((x) => `  - ${x.role}: ${x.purpose}`)]; })() : ["- Not analysed (run with --analyze)."]),
+    "",
+    "## 5. Our creative layer (write before building; describe nothing from the reference)",
+    "- Brand: name, palette (hex), logo or wordmark, end-card copy",
+    "- Characters: each one designed from scratch (shape, outfit, colours, style) and how it differs from anyone in the reference",
+    "- Setting(s):",
+    "- Script / voiceover lines (our words), with target words per second from part 4:",
+    "- Music brief (generated fresh; genre, tempo and energy may follow part 4):",
+    "- Text system: title, caption and deal/label styles (font, size, colours, positions) for the roles in part 3",
+    "- Slot prompts: fill `prompt` for every slot in template.json; keep each slot's timing and grammar from part 3", "",
+    "## 6. Production plan",
+    "| Step | Model / tool | Seconds or count | Quote (USD) |", "|---|---|---|---|",
+    "| Reference images (characters, sets) | GPT Image 2, 1K | TODO | TODO |",
+    "| Video | Seedance (variant), grouped with --svml --group | TODO | TODO |",
+    "| Music / voice | Lyria 3 / ElevenLabs preset voice via OpenRouter | TODO | TODO |",
+    "| Render | Hypit on the server | - | 0 |", "",
+    "## 7. Originality checklist (all must hold)",
+    "- [ ] No reference frame, clip or audio is used as a generation input or appears in the output",
+    "- [ ] No transcribed speech, lyrics or on-screen copy from the reference",
+    "- [ ] Characters, brand, logo, slogan and music are our own designs",
+    "- [ ] Real brands, people and trademarks appear only if we own or are licensed to use them", "",
+    "## 8. Verification targets (check the render with tools/shot-list.mjs --metrics)",
+    `- Duration ${summary.duration}s (within one frame)`,
+    `- Shots ${within(summary.shots, 0.15)} · average shot ${within(summary.averageShot, 0.2)}s · first cut within 0.5s of ${v(summary.firstCut, "s")}`,
+    ...(m.loudnessLufs !== undefined ? [`- Loudness ${round(m.loudnessLufs - 1)} to ${round(m.loudnessLufs + 1)} LUFS, true peak at or below -1 dBTP`] : []),
+    "",
+  ];
+  writeFileSync(join(out, "VIDEO_SPEC.md"), lines.join("\n"));
+}
+
 /** Text safe inside an SVML text:Value body. */
 function svmlText(text) {
   return String(text).replace(/[{}]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").trim();
 }
 
-function writeSvml(templatePath, outOption) {
+function writeSvml(templatePath, outOption, groupSeconds) {
   const template = JSON.parse(readFileSync(templatePath, "utf8"));
   if (template.format !== "shot-list.template@1") throw new Error(`${templatePath} is not a shot-list template`);
   const empty = template.slots.filter((s) => !String(s.prompt ?? "").trim()).map((s) => s.slot);
   if (empty.length) throw new Error(`fill the prompt of slot${empty.length > 1 ? "s" : ""} ${empty.join(", ")} first`);
+  const long = template.slots.filter((s) => s.duration > 15).map((s) => s.slot);
+  if (long.length) throw new Error(`slot${long.length > 1 ? "s" : ""} ${long.join(", ")} run longer than Seedance's 15s; split them`);
   const fps = Math.round(template.fps ?? 30);
   const [rw, rh] = String(template.aspectRatio ?? "9:16").split(":").map(Number);
   const portrait = rh >= rw;
@@ -313,42 +530,64 @@ function writeSvml(templatePath, outOption) {
   const canvas = portrait ? [1080, 1920] : [1920, 1080];
   const variant = template.seedance?.model ?? "mini";
   const resolution = template.seedance?.resolution ?? "720p";
+  const references = template.references ?? [];
+  for (const r of references) if (typeof r.path !== "string" || typeof r.personReference !== "boolean") throw new Error("each reference needs a path and a personReference boolean");
   const pad = (n) => String(n).padStart(2, "0");
+  const punctuate = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
+
+  // Neighbouring slots share one multi-shot clip up to groupSeconds; 0 keeps one clip per slot.
+  const groups = [];
+  for (const slot of template.slots) {
+    const last = groups.at(-1);
+    if (last && groupSeconds > 0 && last.seconds + slot.duration <= groupSeconds) { last.slots.push(slot); last.seconds += slot.duration; }
+    else groups.push({ slots: [slot], seconds: slot.duration });
+  }
   let frame = 0, billed = 0;
-  const slots = template.slots.map((s) => {
-    const frames = Math.max(1, Math.round(s.duration * fps));
-    const clip = Math.min(15, Math.max(4, Math.ceil(s.duration)));
+  const clips = groups.map((g, i) => {
+    const from = frame;
+    let offset = 0;
+    const shotLines = g.slots.map((s, k) => {
+      const camera = [s.shot_size && `${s.shot_size} shot`, s.angle && `${s.angle} angle`, s.camera_move && s.camera_move !== "unclear" && `${s.camera_move} camera`].filter(Boolean).join(", ");
+      const text = `${g.slots.length > 1 ? `Shot ${k + 1}, ${round(offset)} to ${round(offset + s.duration)} seconds: ` : ""}${punctuate(svmlText(s.prompt))}${camera ? ` Camera: ${camera}.` : ""}`;
+      offset += s.duration;
+      frame += Math.max(1, Math.round(s.duration * fps));
+      return text;
+    });
+    const clip = Math.min(15, Math.max(4, Math.ceil(g.seconds)));
     billed += clip;
-    const camera = [s.shot_size && `${s.shot_size} shot`, s.angle && `${s.angle} angle`, s.camera_move && s.camera_move !== "unclear" && `${s.camera_move} camera`]
-      .filter(Boolean).join(", ");
-    const prompt = svmlText(s.prompt);
-    const slot = { id: `slot-${pad(s.slot)}`, from: frame, until: frame + frames, clip, prompt: /[.!?]$/.test(prompt) ? prompt : `${prompt}.`, camera };
-    frame += frames;
-    return slot;
+    return { id: `clip-${pad(i + 1)}`, from, until: frame, clip, slots: g.slots.map((s) => s.slot), shotLines };
   });
+
+  const modules = [["text", "@hypit/text@1"], ...(references.length ? [["asset", "@hypit/media@1"]] : []), ["seedance", "@hypit/seedance@1"],
+    ["mediaop", "@hypit/media-operations@1"], ["time", "@hypit/timeline-author@1"], ["space", "@hypit/spatial@1"], ["visual", "@hypit/visual-track@1"],
+    ["film", "@hypit/film@1"], ["html", "@hypit/html-video@1"]];
   const lines = [
-    '<?svml using="@hypit/markup@1"?>', "<svml>",
-    ...[["text", "@hypit/text@1"], ["seedance", "@hypit/seedance@1"], ["mediaop", "@hypit/media-operations@1"], ["time", "@hypit/timeline-author@1"],
-      ["space", "@hypit/spatial@1"], ["visual", "@hypit/visual-track@1"], ["film", "@hypit/film@1"], ["html", "@hypit/html-video@1"]]
-      .map(([as, from]) => `  <import as="${as}" from="${from}"/>`),
-    '  <import as="look" source="./look.svs"/>',
-    "",
-    `  <!-- Generated by tools/shot-list.mjs from ${basename(templatePath)}: one new Seedance clip per slot, cut to the slot's length. -->`,
-    `  <space:Canvas id="canvas" width="${canvas[0]}" height="${canvas[1]}"/>`,
-    `  <time:Clock id="clock" frame-rate="${fps}"/>`,
+    '<?svml using="@hypit/markup@1"?>', "<svml>", ...modules.map(([as, from]) => `  <import as="${as}" from="${from}"/>`),
+    '  <import as="look" source="./look.svs"/>', "",
+    `  <!-- Generated by tools/shot-list.mjs from ${basename(templatePath)}: ${clips.length} new Seedance clip(s), each cut to its slots' length. -->`,
+    `  <space:Canvas id="canvas" width="${canvas[0]}" height="${canvas[1]}"/>`, `  <time:Clock id="clock" frame-rate="${fps}"/>`,
     '  <space:Frame id="full" within={canvas.bounds} left="0%" top="0%" right="100%" bottom="100%"/>',
+    ...references.map((r, i) => `  <asset:Image id="ref-${i + 1}" src="${svmlText(r.path)}"/>`),
   ];
-  for (const s of slots) {
-    lines.push("", `  <text:Value id="${s.id}-prompt">`, `    ${s.prompt}${s.camera ? `\n    Camera: ${s.camera}.` : ""}`,
-      "    Photorealistic, no on-screen text, no logos.", "  </text:Value>",
-      `  <seedance:TextVideo id="${s.id}" model="${variant}" prompt={${s.id}-prompt} duration="${s.clip}"`,
-      `    resolution="${resolution}" aspect-ratio="${ratio}" generate-audio="false"/>`,
-      `  <mediaop:Normalize id="${s.id}-media" source={${s.id}.video} clock={clock} video="primary-moving" audio="none" span-authority="video"/>`);
+  const style = template.style ? svmlText(template.style) : "";
+  const referenceLine = references.length ? `${references.map((r, i) => `@image${i + 1} ${svmlText(r.role ?? "is a reference")}`).join("; ")}. Keep their designs.` : "";
+  for (const c of clips) {
+    lines.push("", `  <!-- Slots ${c.slots.join(", ")} -->`, `  <text:Value id="${c.id}-prompt">`,
+      ...[style && punctuate(style), referenceLine, ...c.shotLines].filter(Boolean).map((l) => `    ${l}`),
+      "    No on-screen text, no letters on signs, no logos.", "  </text:Value>");
+    const attrs = `model="${variant}" prompt={${c.id}-prompt} duration="${c.clip}"\n    resolution="${resolution}" aspect-ratio="${ratio}" generate-audio="false"`;
+    if (references.length) {
+      lines.push(`  <seedance:ReferenceVideo id="${c.id}" ${attrs}>`,
+        ...references.map((r, i) => `    <seedance:Reference image={ref-${i + 1}} person-reference="${r.personReference}"/>`), "  </seedance:ReferenceVideo>");
+    } else {
+      lines.push(`  <seedance:TextVideo id="${c.id}" ${attrs}/>`);
+    }
+    lines.push(`  <mediaop:Normalize id="${c.id}-media" source={${c.id}.video} clock={clock} video="primary-moving" audio="none" span-authority="video"/>`);
   }
   lines.push("", `  <time:Timeline id="story" clock={clock} end="${frame}f">`,
-    ...slots.map((s) => `    <time:Window id="${s.id}" from="${s.from}f" until="${s.until}f"/>`), "  </time:Timeline>",
+    ...clips.map((c) => `    <time:Window id="${c.id}" from="${c.from}f" until="${c.until}f"/>`), "  </time:Timeline>",
     '  <visual:Track id="picture" timeline={story.timeline}>',
-    ...slots.map((s) => `    <visual:Clip id="${s.id}-clip" media={${s.id}-media.media} during={story.${s.id}} frame={full} z="0" fit="cover"/>`),
+    ...clips.map((c) => `    <visual:Clip id="${c.id}-clip" media={${c.id}-media.media} during={story.${c.id}} frame={full} z="0" fit="cover"/>`),
     "  </visual:Track>",
     '  <film:Film id="main" canvas={canvas.canvas} timeline={story.timeline} appearance={look.film.main}>', "    <film:Track source={picture.visual}/>", "  </film:Film>",
     '  <html:Video id="final" composition={main.composition} timeline={story.timeline}/>', "</svml>", "");
@@ -357,7 +596,7 @@ function writeSvml(templatePath, outOption) {
   writeFileSync(join(out, "main.svml"), lines.join("\n"));
   writeFileSync(join(out, "look.svs"), '<?svml using="@hypit/recipe@1"?>\n<sheet version="1">\n  film.main { background: #000000; }\n</sheet>\n');
   writeFileSync(join(out, "main.svrun"), '<?svml using="@hypit/markup/run@1"?>\n<svrun version="1">\n  <author source="./main.svml"/>\n  <target output="final.video"/>\n</svrun>\n');
-  console.log(`Wrote ${out}/main.svml, main.svrun and look.svs: ${slots.length} slots, ${round(frame / fps)}s at ${fps} fps.`);
+  console.log(`Wrote ${out}/main.svml, main.svrun and look.svs: ${template.slots.length} slots in ${clips.length} clip(s), ${round(frame / fps)}s at ${fps} fps.`);
   console.log(`Seedance ${variant} ${resolution} will bill about ${billed}s of video (4s minimum per clip). Check with: hypit pricing main.svrun`);
 }
 
@@ -365,7 +604,7 @@ function writeSvml(templatePath, outOption) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  if (options.svml !== undefined) return writeSvml(resolve(options.svml), options.out);
+  if (options.svml !== undefined) return writeSvml(resolve(options.svml), options.out, options.group);
   const video = resolve(options.video);
   const out = resolve(options.out ?? `${basename(video, extname(video))}-shots`);
   const framesDir = join(out, "frames");
@@ -392,7 +631,24 @@ async function main() {
   if (options.analyze) {
     console.log(`Labelling ${shots.length} shots with ${options.model}...`);
     analysis = await analyse(video, shots, info.fps, options);
+    try {
+      analysis.content = await summariseContent(video, shots, options.model);
+      analysis.cost += analysis.content.cost;
+    } catch (error) {
+      analysis.contentError = error.message;
+      console.error(`  content summary: ${error.message}`);
+    }
+    if (hasAudio(video)) {
+      try {
+        analysis.audio = await analyseAudio(video, options.model);
+        analysis.cost += analysis.audio.cost;
+      } catch (error) {
+        analysis.audioError = error.message;
+        console.error(`  audio: ${error.message}`);
+      }
+    }
   }
+  const metrics = options.metrics ? measureMetrics(video, shots, info) : undefined;
 
   const record = shots.map((s) => ({
     shot: s.index, start: round(s.start), end: round(s.end), duration: round(s.duration),
@@ -417,8 +673,13 @@ async function main() {
       textOverlayShare: labelled.length ? round(labelled.filter((s) => s.text_role && s.text_role !== "none").length / labelled.length) : null,
       averageMotion: round(shots.reduce((sum, s) => sum + s.motion, 0) / shots.length),
       shotSizes: tally(shots, "shot_size"), cameraMoves: tally(shots, "camera_move"), subjects: tally(shots, "subject"),
+      ...(analysis.audio ? { audio: analysis.audio.labels, speechPace: analysis.audio.pace } : {}),
+      ...(analysis.audioError ? { audioError: analysis.audioError } : {}),
+      ...(analysis.content ? { content: analysis.content.summary } : {}),
+      ...(analysis.contentError ? { contentError: analysis.contentError } : {}),
     });
   }
+  if (metrics) summary.metrics = metrics;
 
   writeFileSync(join(out, "shots.json"), `${JSON.stringify({ summary, shots: record }, null, 2)}\n`);
   const extra = options.analyze ? ["beat", "shot_size", "angle", "camera_move", "subject", "person_on_screen", "lighting", "text_role", "text_position", "motion", "palette"] : [];
@@ -448,15 +709,22 @@ ${record.map((r) => `  <figure><img src="${r.frame}" alt="Shot ${r.shot}" loadin
 </div></body></html>
 `);
   if (options.template) writeTemplate(out, summary, shots);
+  if (options.spec) writeSpec(out, summary, shots);
 
   console.log(`${summary.shots} shots in ${summary.duration}s (average ${summary.averageShot}s, shortest ${summary.shortestShot}s, longest ${summary.longestShot}s)`);
   for (const r of record) {
     const labels = options.analyze && !r.analysisError ? `  ${r.beat} · ${r.shot_size} · ${r.angle} · ${r.camera_move} · ${r.subject}` : "";
     console.log(`  #${String(r.shot).padStart(3)}  ${r.startTimecode} → ${r.endTimecode}  ${r.duration.toFixed(2)}s  ${r.frame}${labels}`);
   }
-  if (analysis) console.log(`Labelled ${shots.length - analysis.failures}/${shots.length} shots for $${analysis.cost.toFixed(4)}.`);
-  console.log(`Wrote ${out}/ (shots.json, shots.csv, frames/, contact-sheet.jpg, index.html${options.template ? ", template.json, template.md" : ""})`);
-  if (analysis?.failures) process.exitCode = 2;
+  if (metrics) {
+    console.log(`Metrics: ${metrics.loudnessLufs ?? "no audio"} LUFS, true peak ${metrics.truePeakDb ?? "-"} dBTP, brightness ${metrics.brightness}, ` +
+      `saturation ${metrics.saturation}, contrast ${metrics.contrast}, motion ${metrics.motionMedian} (p90 ${metrics.motionP90}), ${metrics.cutsPerSecond} cuts/s`);
+  }
+  if (summary.audio) console.log(`Audio: ${JSON.stringify(summary.audio)}${summary.speechPace ? ` · ${summary.speechPace.wordsPerSecond} words/s` : ""}`);
+  if (analysis) console.log(`Labelled ${shots.length - analysis.failures}/${shots.length} shots${analysis.audio ? " and the audio" : ""} for $${analysis.cost.toFixed(4)}.`);
+  const written = ["shots.json", "shots.csv", "frames/", "contact-sheet.jpg", "index.html", ...(options.template ? ["template.json", "template.md"] : []), ...(options.spec ? ["VIDEO_SPEC.md"] : [])];
+  console.log(`Wrote ${out}/ (${written.join(", ")})`);
+  if (analysis?.failures || analysis?.audioError || analysis?.contentError) process.exitCode = 2;
 }
 
 main().catch((error) => {
