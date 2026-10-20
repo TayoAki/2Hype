@@ -1,0 +1,13 @@
+.git
+**/node_modules
+**/dist
+**/.hypit
+**/*.tsbuildinfo
+docs/.vitepress/cache
+docs/.vitepress/dist
+examples/**/assets
+examples/**/build
+examples/**/output
+examples/**/.svml
+.env
+.env.*

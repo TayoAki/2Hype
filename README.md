@@ -1,3 +1,5 @@
+> **2Hype fork:** this copy adds a hosted MCP server for Claude. See [HOSTING.md](./HOSTING.md).
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs/public/hypit-logo-light.svg">
