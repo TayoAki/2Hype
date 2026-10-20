@@ -1,0 +1,37 @@
+{
+  "name": "@hypit/provider-openrouter",
+  "version": "0.1.0",
+  "description": "Hypit Runtime Provider for OpenRouter's video and image generation APIs (maintained in the 2Hype fork)",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "hypit": {
+    "activation": "./src/activation.ts"
+  },
+  "peerDependencies": {
+    "@hypit/hypit": "workspace:^0.3.1",
+    "@hypit/runtime-local": "workspace:^0.1.1"
+  },
+  "devDependencies": {
+    "@hypit/executor": "workspace:*",
+    "@hypit/generation": "workspace:*",
+    "@hypit/gpt-image": "workspace:*",
+    "@hypit/grok-imagine": "workspace:*",
+    "@hypit/hypit": "workspace:*",
+    "@hypit/minimax-h3": "workspace:*",
+    "@hypit/nano-banana": "workspace:*",
+    "@hypit/runtime-local": "workspace:*",
+    "@hypit/seedance": "workspace:*",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@hypit/generation": "workspace:^0.1.0"
+  }
+}
