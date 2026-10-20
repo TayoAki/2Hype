@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hypit": {
+      "type": "http",
+      "url": "https://hypit-mcp-production.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${HYPIT_MCP_TOKEN}"
+      }
+    }
+  }
+}

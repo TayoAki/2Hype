@@ -20,6 +20,15 @@ server added, so Claude can produce Hypit videos on a hosted machine instead of 
 
 Everything else is upstream Hypit, unchanged.
 
+## Current deployment
+
+| Item | Value |
+| --- | --- |
+| Railway project | `2hype-hypit`, service `hypit-mcp`, volume `hypit-data` at `/data` |
+| Public URL | https://hypit-mcp-production.up.railway.app |
+| MCP endpoint | `https://hypit-mcp-production.up.railway.app/mcp` |
+| Token | The `MCP_AUTH_TOKEN` variable on the service in Railway |
+
 ## Deploy on Railway
 
 1. Create a service from this GitHub repository. Railway reads `railway.json` and builds the Dockerfile.
