@@ -49,6 +49,8 @@
 // --group <seconds> neighbouring slots share one multi-shot clip, because Seedance bills at least 4 seconds per
 // clip. A template may add "style" (text prepended to every clip) and "references" ([{ "path", "role",
 // "personReference" }], project-relative images) and "styleByMedium". Run `hypit pricing main.svrun` before building.
+// Phone screens are generated solid green for keying unless the template sets "screenLine", what every phone screen
+// shows (say "its screen shows the app from @image6"): then the generator films the screens itself.
 //
 // --compare measures a render on the reference's own slots (implies --analyze and --metrics) and writes DELTA.md
 // and delta.json: every check the render misses against the reference's shots.json.
@@ -1205,6 +1207,7 @@ function writeSvml(templatePath, outOption, groupSeconds, groupBy = "time", marg
   const SCALE = { "full-body": "full body in frame", "knees-up": "framed from the knees up", "waist-up": "framed from the waist up",
     "chest-up": "framed from the chest up", face: "face fills the frame", detail: "a detail of the subject" };
   // template@2 hold-constant fields become plain instructions in each shot line.
+  const screenLine = template.screenLine ? svmlText(template.screenLine) : "";
   const holdLine = (s) => {
     const parts = [];
     const named = [s.characters ?? []].flat().filter((c) => /^C\d+$/.test(c) && castMap[c]).map((c) => castMap[c]);
@@ -1220,8 +1223,8 @@ function writeSvml(templatePath, outOption, groupSeconds, groupBy = "time", marg
     if (s.people_count > 0 && s.facing && s.facing !== "none") {
       parts.push(`the main character ${s.facing === "away-from-camera" ? "has their back to the camera" : s.facing === "toward-camera" ? "faces the camera" : `is seen in ${s.facing} view`}, ${s.subject_position} of frame, ${SCALE[s.subject_scale] ?? s.subject_scale}${s.expression && s.expression !== "none" ? `, ${s.expression} expression` : ""}`);
     }
-    if (s.device === "held-up") parts.push("a character holds up a phone with its screen facing camera");
-    else if (s.device === "screen-closeup") parts.push("close-up of a phone held in hand; its screen is solid bright green, for a graphic to be laid over it");
+    if (s.device === "held-up") parts.push(`a character holds up a phone with its screen facing camera${screenLine ? `; ${screenLine}` : ""}`);
+    else if (s.device === "screen-closeup") parts.push(`close-up of a phone held in hand; ${screenLine || "its screen is solid bright green, for a graphic to be laid over it"}`);
     else if (PROP[s.held_prop]) parts.push(`the main subject holds ${PROP[s.held_prop]}`);
     if (SETTING[s.setting] && !(s.setup && setupMap[s.setup])) parts.push(SETTING[s.setting]);
     if (s.depth_of_field === "shallow") parts.push("shallow depth of field, background softly blurred");
