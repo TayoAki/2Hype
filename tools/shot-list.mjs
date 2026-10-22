@@ -94,17 +94,17 @@ function usage(message) {
     "                     [--analyze [--model <openrouter model>] [--fallback-model <model>] [--passes 2] [--concurrency 2]]\n" +
     "                     [--template] [--spec] [--own]\n" +
     "                     [--compare <reference shots.json>]\n" +
-    "       node tools/shot-list.mjs --svml <filled-template.json> [--group 15] [--out <dir>]");
+    "       node tools/shot-list.mjs --svml <filled-template.json> [--group 15] [--group-by time|setup] [--margin 0.25] [--out <dir>]");
   process.exit(message ? 1 : 0);
 }
 
 function parseArgs(argv) {
   const options = { threshold: 0.3, minShot: 0.25, frame: "middle", width: 540, columns: 6,
     analyze: false, template: false, metrics: false, spec: false, own: false, model: "google/gemini-2.5-flash", fallbackModel: "openai/gpt-4.1-mini",
-    concurrency: 2, group: 0, passes: 2 };
+    concurrency: 2, group: 0, passes: 2, groupBy: "time", margin: 0.25 };
   const values = { "--out": "out", "--threshold": "threshold", "--min-shot": "minShot", "--frame": "frame", "--width": "width",
-    "--columns": "columns", "--model": "model", "--fallback-model": "fallbackModel", "--concurrency": "concurrency", "--passes": "passes", "--svml": "svml", "--group": "group", "--compare": "compare" };
-  const strings = new Set(["out", "frame", "model", "fallbackModel", "svml", "compare"]);
+    "--columns": "columns", "--model": "model", "--fallback-model": "fallbackModel", "--concurrency": "concurrency", "--passes": "passes", "--svml": "svml", "--group-by": "groupBy", "--margin": "margin", "--group": "group", "--compare": "compare" };
+  const strings = new Set(["out", "frame", "model", "fallbackModel", "svml", "compare", "groupBy"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") usage();
@@ -125,6 +125,9 @@ function parseArgs(argv) {
   if (options.svml !== undefined) {
     if (options.video !== undefined) usage("--svml takes a template, not a video");
     if (!(options.group === 0 || (Number.isInteger(options.group) && options.group >= 4 && options.group <= 15))) usage("--group must be 0 or 4 to 15 seconds");
+    if (!["time", "setup"].includes(options.groupBy)) usage("--group-by must be time or setup");
+    if (options.groupBy === "setup" && !options.group) usage("--group-by setup needs --group <seconds>");
+    if (!(options.margin >= 0 && options.margin <= 1)) usage("--margin must be 0 to 1 seconds");
     return options;
   }
   if (!options.video) usage("a video file is required");
@@ -1174,7 +1177,7 @@ function svmlText(text) {
   return String(text).replace(/[{}]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").trim();
 }
 
-function writeSvml(templatePath, outOption, groupSeconds) {
+function writeSvml(templatePath, outOption, groupSeconds, groupBy = "time", margin = 0.25) {
   const template = JSON.parse(readFileSync(templatePath, "utf8"));
   if (!["shot-list.template@1", "shot-list.template@2"].includes(template.format)) throw new Error(`${templatePath} is not a shot-list template`);
   const empty = template.slots.filter((s) => !String(s.prompt ?? "").trim()).map((s) => s.slot);
@@ -1213,9 +1216,9 @@ function writeSvml(templatePath, outOption, groupSeconds) {
       parts.push(s.people_count === 0 ? (s.hands_in_frame ? "Only hands in frame, no faces" : "No people in frame")
         : `Exactly ${s.people_count} main ${s.people_count === 1 ? "character" : "characters"} in frame${s.hands_in_frame ? ", plus hands" : ""}`);
     }
-    if (Number.isInteger(s.extras_count)) parts.push(s.extras_count ? `about ${s.extras_count} background people` : "no background people");
+    if (Number.isInteger(s.extras_count)) parts.push(s.extras_count ? `about ${s.extras_count} background ${s.extras_count === 1 ? "person" : "people"}` : "no background people");
     if (s.people_count > 0 && s.facing && s.facing !== "none") {
-      parts.push(`the main character ${s.facing === "away-from-camera" ? "has their back to the camera" : s.facing === "toward-camera" ? "faces the camera" : `is seen in ${s.facing}`}, ${s.subject_position} of frame, ${SCALE[s.subject_scale] ?? s.subject_scale}${s.expression && s.expression !== "none" ? `, ${s.expression} expression` : ""}`);
+      parts.push(`the main character ${s.facing === "away-from-camera" ? "has their back to the camera" : s.facing === "toward-camera" ? "faces the camera" : `is seen in ${s.facing} view`}, ${s.subject_position} of frame, ${SCALE[s.subject_scale] ?? s.subject_scale}${s.expression && s.expression !== "none" ? `, ${s.expression} expression` : ""}`);
     }
     if (s.device === "held-up") parts.push("a character holds up a phone with its screen facing camera");
     else if (s.device === "screen-closeup") parts.push("close-up of a phone held in hand; its screen is solid bright green, for a graphic to be laid over it");
@@ -1224,6 +1227,8 @@ function writeSvml(templatePath, outOption, groupSeconds) {
     if (s.depth_of_field === "shallow") parts.push("shallow depth of field, background softly blurred");
     return parts.length ? `${parts.join("; ")}.` : "";
   };
+
+  if (groupBy === "setup") return writeSetupClips(template, templatePath, outOption, groupSeconds, margin, { holdLine, punctuate, pad, MEDIUM, references, variant, resolution, ratio, fps });
 
   // Neighbouring slots share one multi-shot clip up to groupSeconds (0 keeps one clip per slot), never across a change of medium.
   const groups = [];
@@ -1295,12 +1300,87 @@ function writeSvml(templatePath, outOption, groupSeconds) {
   console.log(`Seedance ${variant} ${resolution} will bill about ${billed}s of video (4s minimum per clip). Check with: hypit pricing main.svrun`);
 }
 
+/**
+ * --group-by setup: every slot of a repeated camera setup goes into the same clip, so the set, light and camera stay
+ * identical across the slots that repeat it; clips never mix media. Each shot gets `margin` seconds of spare length
+ * for cutting. Writes clips.svml and clips.svrun (generation only) and clips-plan.json, which tools/assemble.mjs uses
+ * to cut every slot out of the clips and lay them on the template's timeline.
+ */
+function writeSetupClips(template, templatePath, outOption, groupSeconds, margin, h) {
+  const generated = template.slots.filter((s) => s.generate !== false);
+  const setupCount = {};
+  for (const s of generated) if (s.setup) setupCount[s.setup] = (setupCount[s.setup] ?? 0) + 1;
+  const clusters = new Map();
+  for (const s of generated) {
+    // groupWith puts a slot in the clip of a setup it shares a location with (a closer angle on the same set).
+    const key = s.groupWith ? `setup:${s.groupWith}` : s.setup && setupCount[s.setup] > 1 ? `setup:${s.setup}` : `slot:${s.slot}`;
+    if (!clusters.has(key)) clusters.set(key, { medium: s.medium, slots: [] });
+    clusters.get(key).slots.push(s);
+  }
+  const span = (s) => s.duration + margin;
+  const groups = [];
+  for (const cluster of clusters.values()) {
+    const seconds = cluster.slots.reduce((sum, s) => sum + span(s), 0);
+    if (seconds > 15) throw new Error(`setup with slots ${cluster.slots.map((s) => s.slot).join(", ")} needs ${round(seconds)}s, more than one 15s clip`);
+    const fit = groups.find((g) => g.medium === cluster.medium && g.seconds + seconds <= groupSeconds);
+    if (fit) { fit.slots.push(...cluster.slots); fit.seconds += seconds; } else groups.push({ medium: cluster.medium, slots: [...cluster.slots], seconds });
+  }
+  const references = h.references;
+  const referenceLine = references.length ? `${references.map((r, i) => `@image${i + 1} ${svmlText(r.role ?? "is a reference")}`).join("; ")}. Keep their designs.` : "";
+  const textRule = template.textRule ?? "No on-screen text, no letters on signs, no logos.";
+  const lines = ['<?svml using="@hypit/markup@1"?>', "<svml>", '  <import as="text" from="@hypit/text@1"/>',
+    ...(references.length ? ['  <import as="asset" from="@hypit/media@1"/>'] : []), '  <import as="seedance" from="@hypit/seedance@1"/>', "",
+    `  <!-- Generated by tools/shot-list.mjs from ${basename(templatePath)}, grouped by camera setup. Cut and assembled by tools/assemble.mjs. -->`,
+    ...references.map((r, i) => `  <asset:Image id="ref-${i + 1}" src="${svmlText(r.path)}"/>`)];
+  const plan = { format: "shot-list.clips-plan@1", template: basename(templatePath), timelineFps: h.fps, margin, clips: [] };
+  let billed = 0;
+  groups.forEach((g, i) => {
+    const id = `clip-${h.pad(i + 1)}`;
+    const clip = Math.min(15, Math.max(4, Math.ceil(g.seconds - 1e-9)));
+    billed += clip;
+    let offset = 0;
+    const shots = [];
+    const shotLines = g.slots.map((s, k) => {
+      const camera = [s.shot_size && `${s.shot_size} shot`, s.angle && `${s.angle} angle`, s.camera_move && s.camera_move !== "unclear" && `${s.camera_move} camera`].filter(Boolean).join(", ");
+      const hold = h.holdLine(s);
+      const from = offset, to = offset + span(s);
+      offset = to;
+      shots.push({ slot: s.slot, from: round(from), to: round(to), frames: s.frames ?? Math.round(s.duration * h.fps), setup: s.setup ?? null });
+      return `Shot ${k + 1}, ${round(from)} to ${round(to)} seconds: ${h.punctuate(svmlText(s.prompt))}${hold ? ` ${hold}` : ""}${camera ? ` Camera: ${camera}.` : ""}`;
+    });
+    const style = template.styleByMedium?.[g.medium] ?? template.style ?? h.MEDIUM[g.medium] ?? "";
+    const useReferences = references.length && g.medium !== "live-action";
+    lines.push("", `  <!-- Slots ${g.slots.map((s) => s.slot).join(", ")} (${g.medium}) -->`, `  <text:Value id="${id}-prompt">`,
+      ...[style && h.punctuate(svmlText(style)), useReferences ? referenceLine : "", `${g.slots.length} separate shots with a hard cut between each.`, ...shotLines, svmlText(textRule)]
+        .filter(Boolean).map((l) => `    ${l}`), "  </text:Value>");
+    const attrs = `model="${h.variant}" prompt={${id}-prompt} duration="${clip}"
+    resolution="${h.resolution}" aspect-ratio="${h.ratio}" generate-audio="false"`;
+    if (useReferences) {
+      lines.push(`  <seedance:ReferenceVideo id="${id}" ${attrs}>`,
+        ...references.map((r, k) => `    <seedance:Reference image={ref-${k + 1}} person-reference="${r.personReference}"/>`), "  </seedance:ReferenceVideo>");
+    } else {
+      lines.push(`  <seedance:TextVideo id="${id}" ${attrs}/>`);
+    }
+    plan.clips.push({ id, seconds: clip, medium: g.medium, shots });
+  });
+  lines.push("</svml>", "");
+  const out = resolve(outOption ?? ".");
+  mkdirSync(out, { recursive: true });
+  writeFileSync(join(out, "clips.svml"), lines.join("\n"));
+  writeFileSync(join(out, "clips.svrun"), ['<?svml using="@hypit/markup/run@1"?>', '<svrun version="1">', '  <author source="./clips.svml"/>',
+    ...plan.clips.map((c) => `  <target output="${c.id}.video"/>`), "</svrun>", ""].join("\n"));
+  writeFileSync(join(out, "clips-plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
+  console.log(`Wrote ${out}/clips.svml, clips.svrun and clips-plan.json: ${generated.length} slots in ${plan.clips.length} clip(s) grouped by setup.`);
+  for (const c of plan.clips) console.log(`  ${c.id}: ${c.seconds}s ${c.medium}, slots ${c.shots.map((x) => x.slot).join(", ")}`);
+  console.log(`Seedance ${h.variant} ${h.resolution} will bill about ${billed}s of video. Check with: hypit pricing clips.svrun`);
+}
+
 // ---------- main ----------
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.own) console.log("Own-content mode: transcripts, exact on-screen text and full designs. Use it only on video you own or are licensed to adapt.");
-  if (options.svml !== undefined) return writeSvml(resolve(options.svml), options.out, options.group);
+  if (options.svml !== undefined) return writeSvml(resolve(options.svml), options.out, options.group, options.groupBy, options.margin);
   const video = resolve(options.video);
   const out = resolve(options.out ?? `${basename(video, extname(video))}-shots`);
   const framesDir = join(out, "frames");

@@ -165,6 +165,30 @@ Read VIDEO_SPEC.md and template.json completely before writing a file. Build onl
 
 ### 3b. Picture
 
+For a template@2 reference (repeated setups, recurring cast), generate by setup and assemble:
+
+```bash
+node /app/tools/shot-list.mjs --svml template.json --group 15 --group-by setup --margin 0.25 --out .
+# build clips.svrun (paid, 3d), export each clip to assets/takes/<clip id>.mp4, then:
+node /app/tools/assemble.mjs --plan clips-plan.json --template template.json --takes assets/takes --out assets/slots
+```
+
+`--group-by setup` puts every slot of a repeated setup in one clip (same set, light and camera), never mixes media,
+and writes `clips-plan.json`. `assemble.mjs` finds each clip's cuts (a cut between two shots of one setup scores
+low; it searches for that weaker peak), cuts each slot from inside its shot, slows a short shot by up to 1.35x with
+motion-interpolated frames, grades each slot into the template's brightness and saturation, and writes
+`assembly-sheet.jpg` (first, middle and last frame per slot). Read the sheet and the warnings before going on.
+A slot whose shot came out too short or wrong can be regenerated in a small replacement clip: append it to the plan
+and mark the original shot `"skip": true`. Regenerate the whole setup group, not one slot of it, or the repeat is
+lost. Put the longest shot first in a multi-shot clip; the last shots tend to come out short.
+
+Phone screens: generate them solid green, cut with `--no-grade` into a second folder, run
+`python3 /app/tools/key-screen.py <cut> <before.png> <after.png> <out> --mode closeup|all [--switch 0.55]` with our
+designed screens (drawn, never generated, so every word is spelled right), then apply the slot's grade from
+`assembly.json`. `--glow` removes the green light a screen throws on a face that looks at it.
+
+For a template@1 reference, or a single-clip-per-group build:
+
 ```bash
 node /app/tools/shot-list.mjs --svml analysis/reference/template.json --group 15 --out .
 ```
@@ -176,6 +200,11 @@ with `gain` and `fade-out`), voiceover, titles, captions, deal callouts and the 
 
 ### 3c. Sound
 
+- With a template@2 voice map, one command does all of it:
+  `node /app/tools/soundtrack.mjs --template template.json --out assets/audio --music-prompt "<brief>"` speaks each
+  phrase line with the preset voice, fits it into its measured window (at most 1.25x faster; it warns when a line
+  is too long, often because of commas), generates the music at the template's tempo, stretches and shifts it onto
+  the reference's beat grid, ducks it under the voice and masters `mix.wav` to -14 LUFS. Reuse a track with `--music`.
 - Music: Lyria 3 through OpenRouter (`google/lyria-3-clip-preview`, about $0.04 per 30 s), streamed from
   `/chat/completions` with `modalities: ["text","audio"]`. Ask for no vocals unless the spec says otherwise.
 - Voice: an ElevenLabs preset through OpenRouter (`/audio/speech`, `elevenlabs/eleven-v3`, a voice from the
@@ -281,7 +310,12 @@ exercises the whole `--analyze --spec` and `--compare` paths, with and without `
 - **Downloads:** YouTube refuses server and sandbox downloads ("Sign in to confirm you're not a bot"); use an upload
   link. Stock photos, when the spec allows them, must be CC0, public domain or CC BY (not share-alike), with a
   credits file.
-- **OpenRouter balance:** audio analysis needs at least $0.50; a negative balance blocks all generation.
+- **OpenRouter balance:** audio analysis needs at least $0.50; a negative balance blocks all generation, and an
+  analysis run that hits it mid-way reports every unlabelled check as a miss (HTTP 402 in the log), so its score is
+  void. Compare this key's usage (`/api/v1/key`) with the account's (`/api/v1/credits`) before and after a build:
+  a gap is another key spending from the same account.
+- **Edit tracks:** a `visual:Track` holds one clip per window; overlays (fine print, an end-card logo) go on their
+  own track.
 - **Labelling:** Gemini sometimes refuses a frame set (HTTP 200 with "blocked the response"); the tool retries that
   shot on `--fallback-model` (default `openai/gpt-4.1-mini`).
 - **Template only held timing (Pepper Lane v3).** Matching every cut to the frame still produced a different-feeling
@@ -300,6 +334,7 @@ exercises the whole `--analyze --spec` and `--compare` paths, with and without `
 
 | Date | Changes |
 | --- | --- |
+| 2026-10-22 | Setup-grouped generation (`--group-by setup`, `groupWith`), `assemble.mjs` (cut matching with soft cuts, interpolated slowdown, look grading, replacement clips), `key-screen.py` (green-screen phone UIs, glow removal), `soundtrack.mjs` (phrase-fitted voice, tempo- and beat-matched ducked music, mastering). Pepper Lane v4: 386 of 464 format checks (reference against itself 454 of 463); model-free checks 65 of 66 (v3: 45 of 66). |
 | 2026-10-22 | Template@2: Hold constant variables per slot (people, hands, medium, device, prop, setting, text layer, layout), continuity (recurring characters, repeated setups), voice phrase map, measured tempo and beat sync, timeline fps; `--compare` writes DELTA.md; `--svml` uses the new fields; fallback labelling model. |
 | 2026-10-22 | Framing, expression, extras, focus, kinds of text, per-slot look, hands owner and phrase roles in the template; voted labels, agreed continuity with a thumbnail check, two-encoding transcription; `castMap`/`setupMap` in `--svml`; green-screen phone inserts. |
 | 2026-10-22 | Lessons for cutting multi-shot generated clips into measured slots (Pepper Lane v3 madlib build). |
