@@ -259,6 +259,17 @@ export function registerStudioTools(server: McpServer, baseUrl: string): void {
       return { content };
     }, true);
 
+  tool("studio_media", "Fetch a project file's bytes", "A project file as base64 for a page to show (an artifact cannot load the server's URLs): the reference's playback copy reference/proxy.mp4, the cut's final/proxy.mp4, a clip slots/slot-03.mp4, or an image. At most 15 MB; videos are 640 px playback copies.",
+    { project, path: z.string() }, async ({ project: id, path }, studio) => {
+      const target = studio.file(id, path);
+      const info = await stat(target).catch(() => undefined);
+      if (!info?.isFile()) throw new Error(`No file at ${path}.`);
+      if (info.size > 15 * 1024 * 1024) throw new Error("The file is larger than 15 MB; use studio_link for it.");
+      const ext: string = String(path).split(".").pop()?.toLowerCase() ?? "";
+      const mime = ({ mp4: "video/mp4", webm: "video/webm", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", wav: "audio/wav", mp3: "audio/mpeg", json: "application/json" } as Record<string, string>)[ext] ?? "application/octet-stream";
+      return text(JSON.stringify({ path, mime, size: info.size, base64: (await readFile(target)).toString("base64") }));
+    }, true);
+
   tool("studio_link", "Link to a project file", "A time-limited https link to a project file (the final cut final/final.mp4, a clip slots/slot-03.mp4, a still stills/slot-03.png) that opens in a browser.",
     { project, path: z.string(), hours: z.number().min(0.1).max(72).optional() }, ({ project: id, path, hours }, studio) => {
       studio.file(id, path);
