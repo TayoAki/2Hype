@@ -183,9 +183,14 @@ and mark the original shot `"skip": true`. Regenerate the whole setup group, not
 lost. Put the longest shot first in a multi-shot clip; the last shots tend to come out short.
 
 Phone screens: generate them solid green, cut with `--no-grade` into a second folder, run
-`python3 /app/tools/key-screen.py <cut> <before.png> <after.png> <out> --mode closeup|all [--switch 0.55]` with our
-designed screens (drawn, never generated, so every word is spelled right), then apply the slot's grade from
-`assembly.json`. `--glow` removes the green light a screen throws on a face that looks at it.
+`python3 /app/tools/key-screen.py <cut> <before.png> <after.png> <out> --mode track --button x0,y0,x1,y1` for
+close-ups and `--mode all` for phones held up in wider shots, with our designed screens (drawn, never generated, so
+every word is spelled right), then apply the slot's grade from `assembly.json`. Track mode follows the phone body,
+not the visible green, so a thumb over a corner no longer squashes the screen, and it replaces only each pixel's
+screen share, so a fast fingertip stays a finger instead of a ghost; the button flips when the finger reaches it.
+`--glow` removes the green light a screen throws on a face that looks at it. Better still, when there is budget:
+ask for a plain light-grey screen (a real phone's glow, no green on faces or fingers) and pass one phone reference
+image so the case is the same in every shot.
 
 For a template@1 reference, or a single-clip-per-group build:
 
