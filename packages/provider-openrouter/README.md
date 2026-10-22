@@ -53,6 +53,7 @@ the same one. A writable Store also works: `hypit auth login openrouter.default`
 | `personReferences` | `submit` | OpenRouter has no person-reference field. `submit` sends such media as ordinary references; `refuse` declines the request |
 | `maxInlineMegabytes` | `24` | Reference image bytes inlined into one request as base64 data URLs |
 | `stagingDirectory`, `stagingBaseUrl` | unset | Set together. Audio and video references are written to the directory under random names and sent as `stagingBaseUrl/<name>`, which must be public HTTPS serving that directory |
+| `jobLedgerPath`, `jobLedgerMaxAgeHours` | unset, `24` | JSON file recording submitted video jobs by a fingerprint of the authored request; a later identical request reuses a pending, rendering or completed job instead of paying again |
 | `defaultConcurrency` | `4` | Simultaneous requests across this Endpoint |
 | `actionLimits` | submit 2, poll 8, collect 2 | Video lifecycle admission |
 | `pollIntervalMs` | `10000` | Delay between video status reads |
@@ -70,6 +71,11 @@ the same one. A writable Store also works: `hypit auth login openrouter.default`
   `stagingDirectory` and sent as `audio_url` or `video_url` entries pointing at `stagingBaseUrl`.
   Without staging, a request with audio or video references is refused before it is submitted.
   The host owns serving and deleting staged files.
+- **Job ledger**: with `jobLedgerPath`, each video submission is recorded under a SHA-256 fingerprint of the model
+  and the authored request (prompt, settings, references by content hash). A Build that failed after submitting
+  leaves its jobs in the ledger; the next Build with the same request polls and collects that job instead of
+  submitting again. Failed, cancelled or expired jobs, unknown ids and entries older than the maximum age are not
+  reused. Any change to the request is a new fingerprint and a new job.
 - **Cost**: when OpenRouter reports a job's cost, the Provider records it as an execution diagnostic.
   `hypit pricing` reads the public model catalogue and states the per-second rate at the requested size.
 - **Doctor**: `hypit doctor --endpoint openrouter.default` checks the key, reports remaining credits

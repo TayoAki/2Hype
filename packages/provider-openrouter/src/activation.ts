@@ -28,7 +28,7 @@ const adapter = createRuntimeEndpointAdapterFacet({
     runtimeConfigExact(config, [
       "baseUrl", "apiKey", "defaultConcurrency", "actionLimits", "pollIntervalMs", "requestTimeoutMs",
       "imageTimeoutMs", "downloadTimeoutMs", "gptImageQuality", "personReferences", "maxInlineMegabytes",
-      "stagingDirectory", "stagingBaseUrl",
+      "stagingDirectory", "stagingBaseUrl", "jobLedgerPath", "jobLedgerMaxAgeHours",
     ], "OpenRouter");
     const apiKey = runtimeConfigCredentialRef(config.apiKey, "OpenRouter apiKey");
     if (apiKey === undefined) throw new Error("OpenRouter apiKey CredentialRef is required");
@@ -49,6 +49,8 @@ const adapter = createRuntimeEndpointAdapterFacet({
     if ((stagingDirectory === undefined) !== (stagingBaseUrl === undefined)) {
       throw new Error("OpenRouter stagingDirectory and stagingBaseUrl must be set together");
     }
+    const jobLedgerPath = runtimeConfigString(config.jobLedgerPath, "OpenRouter jobLedgerPath");
+    const jobLedgerMaxAgeHours = runtimeConfigPositiveInteger(config.jobLedgerMaxAgeHours, "OpenRouter jobLedgerMaxAgeHours");
     const options: CreateOpenRouterProviderOptions = {
       instance: context.instance,
       pool: context.pool,
@@ -65,6 +67,8 @@ const adapter = createRuntimeEndpointAdapterFacet({
       ...(personReferences === undefined ? {} : { personReferences }),
       ...(stagingDirectory === undefined || stagingBaseUrl === undefined ? {}
         : { referenceStaging: { directory: stagingDirectory, baseUrl: stagingBaseUrl } }),
+      ...(jobLedgerPath === undefined ? {} : { jobLedgerPath }),
+      ...(jobLedgerMaxAgeHours === undefined ? {} : { jobLedgerMaxAgeHours }),
     };
     return {
       endpoint: createOpenRouterProvider(options),

@@ -27,6 +27,8 @@ type ProfileOptions = {
   readonly renderWorkers?: number | undefined;
   /** Where OpenRouter can fetch audio and video references: a directory this server serves at `baseUrl`. */
   readonly staging?: { readonly directory: string; readonly baseUrl: string } | undefined;
+  /** Shared record of submitted OpenRouter video jobs, so a rebuild reuses a job instead of paying for it again. */
+  readonly jobLedgerPath?: string | undefined;
 };
 
 /** Adapt a freshly initialised (or existing) Runtime Profile to this server. Returns notes for the agent. */
@@ -71,7 +73,13 @@ export async function adaptProfile(dir: string, options: ProfileOptions): Promis
         openRouter.config.stagingBaseUrl = options.staging.baseUrl;
         notes.push("openrouter.default publishes audio and video references at this server's /staged URL, because OpenRouter fetches them by HTTPS.");
       }
-    } else if (openRouter?.config?.stagingBaseUrl === undefined) {
+    }
+    if (openRouter?.use === "@hypit/provider-openrouter" && options.jobLedgerPath && openRouter.config?.jobLedgerPath === undefined) {
+      openRouter.config ??= {};
+      openRouter.config.jobLedgerPath = options.jobLedgerPath;
+      notes.push("openrouter.default records submitted video jobs, so a rebuild after a failure reuses them instead of paying again.");
+    }
+    if (openRouter?.use === "@hypit/provider-openrouter" && !options.staging?.baseUrl.startsWith("https://") && openRouter.config?.stagingBaseUrl === undefined) {
       notes.push("This server has no public HTTPS address, so openrouter.default refuses audio and video references. Set PUBLIC_BASE_URL and rerun project_create.");
     }
     profile.bindings ??= {};

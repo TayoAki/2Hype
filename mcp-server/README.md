@@ -33,6 +33,7 @@ plus notes on how its local-shell steps map onto these tools.
 | `HYPIT_HUB_API_KEY` | unset | HypiHub API key, for voices, hosted alignment, matting and models OpenRouter lacks. |
 | `HYPIT_RENDER_WORKERS` | unset | Browser workers for local HTML rendering in new projects. Match it to the machine size. |
 | `PUBLIC_BASE_URL` | Railway domain | Base URL used in signed file links and for staged OpenRouter references. |
+| `OPENROUTER_JOB_LEDGER` | `/data/openrouter-jobs.json` | Shared record of submitted OpenRouter video jobs; `project_create` points every project's OpenRouter Endpoint at it so rebuilds reuse jobs instead of paying again. |
 | `HYPIT_STAGING_DIR`, `HYPIT_STAGING_MAX_AGE_HOURS` | `/data/staged`, `24` | Audio and video references the OpenRouter Provider publishes at `GET /staged/<random name>` (no token; names carry 128 random bits) and the age after which they are deleted. |
 | `MCP_SIGNING_SECRET` | the auth token | Separate key for signed links, if you want to rotate them independently. |
 | `MCP_ENABLE_SHELL` | `1` | Set to `0` to remove `run_command`. Component authoring needs it. |

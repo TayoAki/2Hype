@@ -270,6 +270,7 @@ export function registerHypitTools(server: McpServer, baseUrl: string): void {
         env: process.env,
         renderWorkers: config.renderWorkers,
         staging: { directory: config.stagingDir, baseUrl: `${config.publicBaseUrl ?? baseUrl}/staged` },
+        jobLedgerPath: config.jobLedgerPath,
       });
       const profile = existsSync(join(dir, "hypit.runtime.json"))
         ? await readFile(join(dir, "hypit.runtime.json"), "utf8")

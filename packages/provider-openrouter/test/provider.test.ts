@@ -349,3 +349,53 @@ test("doctor reports remaining credits and models missing from the catalogue", a
     fetch: async () => new Response("{}", { status: 401 }) }, { credentials: { apiKey: { secret: "bad" } } });
   assert.equal(rejected[0]?.code, "OPENROUTER_KEY_REJECTED");
 });
+
+test("the job ledger reuses a live job for the same request and resubmits failed or changed ones", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "openrouter-ledger-"));
+  const ledger = join(directory, "jobs.json");
+  const resources = new MemoryResourceStore();
+  const statuses: Record<string, string> = {};
+  let submitted = 0;
+  const { calls, fetch } = recorder((call) => {
+    if (call.method === "POST") {
+      const id = `gen-vid-${++submitted}`;
+      statuses[id] = "pending";
+      return Response.json({ id, status: "pending", polling_url: "x" }, { status: 202 });
+    }
+    const id = call.path.split("/").pop()!;
+    return Response.json({ id, status: statuses[id] ?? "failed" });
+  });
+  const start = async (prompt: string) => {
+    const provider = createOpenRouterProvider({ instance: "o", pool: "o", apiKey, baseUrl: BASE, fetch, jobLedgerPath: ledger });
+    const request = need("seedance-2-mini", "@hypit/seedance", sealSeedanceRequest("seedance-2-mini", { ...seedanceBase, prompt: [prompt] }));
+    const registry = new EndpointRegistry();
+    await provider.install(registry);
+    const resolved = registry.resolve(request);
+    assert.equal(resolved.status, "resolved");
+    assert.equal(resolved.registration.kind, "asynchronous");
+    const diagnostics: string[] = [];
+    const started = await resolved.registration.endpoint.start({ need: request, command: { kind: "fulfill-need", id: "c", need: request },
+      operation: "o", resources, credentials: { apiKey: { secret: "k" } },
+      reportDiagnostic: async (d: { message: string }) => { diagnostics.push(d.message); } } as unknown as EndpointStartContext);
+    assert.equal(started.status, "pending");
+    return { id: (started.handle as unknown as { id: string }).id, diagnostics };
+  };
+
+  const first = await start("A clay shopper dances");
+  assert.equal(first.id, "gen-vid-1");
+  const stored = JSON.parse(await readFile(ledger, "utf8"));
+  assert.equal(stored.format, "openrouter.job-ledger@1");
+  assert.equal(Object.values(stored.jobs).length, 1);
+
+  // A rebuild after a failure asks again: the pending job is reused, nothing is paid twice.
+  const again = await start("A clay shopper dances");
+  assert.equal(again.id, "gen-vid-1");
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1);
+  assert.match(again.diagnostics[0]!, /Reusing OpenRouter video job gen-vid-1/u);
+
+  // A failed job is not reusable, and a changed prompt is a different request.
+  statuses["gen-vid-1"] = "failed";
+  assert.equal((await start("A clay shopper dances")).id, "gen-vid-2");
+  assert.equal((await start("A clay shopper waves")).id, "gen-vid-3");
+  assert.equal(calls.filter((c) => c.method === "POST").length, 3);
+});

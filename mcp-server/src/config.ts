@@ -32,6 +32,8 @@ export const config = {
    */
   stagingDir: resolve(process.env.HYPIT_STAGING_DIR ?? join(workspace, "..", "staged")),
   stagingMaxAgeHours: intFromEnv("HYPIT_STAGING_MAX_AGE_HOURS", 24),
+  /** Submitted OpenRouter video jobs by request fingerprint, shared by every project on this server. */
+  jobLedgerPath: resolve(process.env.OPENROUTER_JOB_LEDGER ?? join(workspace, "..", "openrouter-jobs.json")),
   /** Base URL used in signed file links; falls back to the Railway domain, then the request host. */
   publicBaseUrl:
     process.env.PUBLIC_BASE_URL?.replace(/\/+$/, "") ??

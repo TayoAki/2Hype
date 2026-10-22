@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { RuntimeDoctorDiagnostic } from "@hypit/runtime-local/extension";
 import { canonicalize, defineEndpoint, wakeAfter } from "@hypit/hypit/endpoint";
 import type {
@@ -49,6 +49,14 @@ export type CreateOpenRouterProviderOptions = {
    * that directory at that address. Without it, requests carrying audio or video references are refused.
    */
   readonly referenceStaging?: ReferenceStaging;
+  /**
+   * JSON file recording every submitted video job by a fingerprint of its authored request. A later start of the
+   * same request reuses a job that is still pending, rendering or completed instead of paying for it again, which
+   * covers Builds that failed after submitting. Shared by every Endpoint that names the same file.
+   */
+  readonly jobLedgerPath?: string;
+  /** How long a recorded job may be reused. Defaults to 24 hours. */
+  readonly jobLedgerMaxAgeHours?: number;
   readonly fetch?: typeof globalThis.fetch;
 };
 
@@ -79,6 +87,46 @@ function redact(message: string): string {
     .replace(/data:[^\s"']+/giu, "[data-url]")
     .replace(/https?:\/\/\S+/giu, "[url]")
     .slice(0, 600);
+}
+
+type LedgerEntry = { readonly id: string; readonly model: string; readonly createdAt: string };
+type Ledger = { readonly format: "openrouter.job-ledger@1"; readonly jobs: Readonly<Record<string, LedgerEntry>> };
+const REUSABLE_STATUSES = new Set(["pending", "in_progress", "completed"]);
+
+/** JSON with object keys sorted, so equal values always serialise identically. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((k) => `${JSON.stringify(k)}:${stableJson(record[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** The model plus the authored request (prompt, settings and references by content hash) identifies a job. */
+export function requestFingerprint(model: string, constraints: unknown): string {
+  return createHash("sha256").update(stableJson({ model, constraints })).digest("hex");
+}
+
+async function readLedger(path: string): Promise<Record<string, LedgerEntry>> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<Ledger>;
+    return parsed.format === "openrouter.job-ledger@1" && parsed.jobs ? { ...parsed.jobs } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Adds one job, drops expired ones, and replaces the file atomically. */
+async function recordJob(path: string, fingerprint: string, entry: LedgerEntry, maxAgeMs: number): Promise<void> {
+  const jobs = await readLedger(path);
+  const now = Date.now();
+  for (const [key, job] of Object.entries(jobs)) if (!(now - Date.parse(job.createdAt) < maxAgeMs)) delete jobs[key];
+  jobs[fingerprint] = entry;
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(temporary, `${JSON.stringify({ format: "openrouter.job-ledger@1", jobs } satisfies Ledger, null, 2)}\n`);
+  await rename(temporary, path);
 }
 
 /** OpenRouter fetches staged media itself, so only a public HTTPS address will do. */
@@ -375,6 +423,8 @@ export function createOpenRouterProvider(options: CreateOpenRouterProviderOption
   const maxInline = options.maxInlineBytes ?? 24 * 1024 * 1024;
   const staging = options.referenceStaging === undefined ? undefined
     : { directory: options.referenceStaging.directory, baseUrl: stagingAddress(options.referenceStaging.baseUrl) };
+  const ledgerPath = options.jobLedgerPath;
+  const ledgerMaxAge = (options.jobLedgerMaxAgeHours ?? 24) * 3_600_000;
   const key = (credentials: Readonly<Record<string, { readonly secret: string }>>) =>
     text(credentials.apiKey?.secret, "OpenRouter API key");
 
@@ -412,12 +462,34 @@ export function createOpenRouterProvider(options: CreateOpenRouterProviderOption
         const secret = key(context.credentials);
         const authored = context.need.constraints as unknown as GenerationRequest;
         selectWireModelForRequest(spec.mapping, authored);
+        const fingerprint = ledgerPath === undefined ? undefined : requestFingerprint(spec.model, context.need.constraints);
+        if (ledgerPath !== undefined && fingerprint !== undefined) {
+          const earlier = (await readLedger(ledgerPath))[fingerprint];
+          if (earlier !== undefined && Date.now() - Date.parse(earlier.createdAt) < ledgerMaxAge) {
+            let status: string | undefined;
+            try {
+              const job = await api("GET", `/videos/${encodeURIComponent(earlier.id)}`, secret, undefined, requestTimeout);
+              status = typeof job.status === "string" ? job.status : undefined;
+            } catch { /* An unknown or expired job is not reusable; submit a new one. */ }
+            if (status !== undefined && REUSABLE_STATUSES.has(status)) {
+              const handle = { id: earlier.id };
+              const receipt = { id: earlier.id, reusedFrom: earlier.createdAt };
+              await context.reportDiagnostic?.({ level: "info",
+                message: `Reusing OpenRouter video job ${earlier.id} (${status}), submitted ${earlier.createdAt} for this exact request` });
+              await context.checkpoint?.({ handle, receipt });
+              return { ...wakeAfter(handle, status === "completed" ? 0 : interval, Date.now(), { phase: `reusing job submitted ${earlier.createdAt}` }), receipt };
+            }
+          }
+        }
         await context.reportProgress?.({ phase: `Preparing ${spec.model} request` });
         const compiled = await compileWireRequest(spec.mapping, authored, referenceResolver(context.resources, maxInline, staging));
         const body = videoBody(spec, compiled.input as Readonly<Record<string, CanonicalValue>>);
         await context.reportProgress?.({ phase: `Submitting ${spec.model} request` });
         const job = await api("POST", "/videos", secret, body, requestTimeout);
         const id = text(job.id, "OpenRouter video job id");
+        if (ledgerPath !== undefined && fingerprint !== undefined) {
+          await recordJob(ledgerPath, fingerprint, { id, model: spec.model, createdAt: new Date().toISOString() }, ledgerMaxAge);
+        }
         const handle = { id };
         const receipt = { id };
         await context.checkpoint?.({ handle, receipt });

@@ -66,3 +66,14 @@ test("an HTTPS address lets OpenRouter fetch staged audio and video references, 
   assert.equal(read(local).endpoints["openrouter.default"].config.stagingBaseUrl, undefined);
   assert.ok(refused.some((note) => note.includes("refuses audio and video references")));
 });
+
+test("projects share one OpenRouter job ledger, added on a rerun and never overwritten", async () => {
+  const dir = project();
+  await adaptProfile(dir, { env: { OPENROUTER_API_KEY: "sk-or" } });
+  assert.equal(read(dir).endpoints["openrouter.default"].config.jobLedgerPath, undefined);
+  const notes = await adaptProfile(dir, { env: { OPENROUTER_API_KEY: "sk-or" }, jobLedgerPath: "/data/openrouter-jobs.json" });
+  assert.equal(read(dir).endpoints["openrouter.default"].config.jobLedgerPath, "/data/openrouter-jobs.json");
+  assert.ok(notes.some((note) => note.includes("reuses them instead of paying again")));
+  await adaptProfile(dir, { env: { OPENROUTER_API_KEY: "sk-or" }, jobLedgerPath: "/elsewhere.json" });
+  assert.equal(read(dir).endpoints["openrouter.default"].config.jobLedgerPath, "/data/openrouter-jobs.json");
+});
