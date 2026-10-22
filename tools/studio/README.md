@@ -11,7 +11,7 @@ One engine (`engine.mjs`) runs every step; three ways drive it:
 | Where | How |
 | --- | --- |
 | Web app | `https://<server>/studio` on the hosted MCP server (sign in with the server's `MCP_AUTH_TOKEN`) |
-| Chat or a claude.ai artifact | the server's `studio_*` MCP tools (the connector at `https://<server>/mcp/<token>`) |
+| Chat or a claude.ai artifact | the server's `studio_*` MCP tools (the connector at `https://<server>/mcp/<token>`, named "Remake Studio" for the artifact page) |
 | Shell | `node tools/studio/cli.mjs <projects dir> ...` |
 
 ## Steps
@@ -30,7 +30,8 @@ One engine (`engine.mjs`) runs every step; three ways drive it:
 | compare | The cut against the reference, led by the format-critical score (`shot-list.mjs --compare`) | about 5¢ |
 
 `all` runs draft to check, `images` runs plates, stills and check, `video` runs animate, soundtrack and final.
-`stills` and `animate` take `only` (shot numbers) to redo single shots.
+`stills` and `animate` take `only` (shot numbers) to redo single shots, and a run can name its own list of steps
+(`["animate", "final"]` animates one shot and restrings the cut).
 
 ## Projects
 

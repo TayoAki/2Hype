@@ -105,7 +105,7 @@ export function mountStudio(app: Express): void {
   app.put("/studio/api/projects/:id/voice/:phrase", auth, body, wrap((req, _res, studio) => studio.editLine(String(req.params.id), Number(req.params.phrase), String(req.body?.line ?? ""))));
   app.put("/studio/api/projects/:id/decisions", auth, body, wrap((req, _res, studio) => studio.setDecisions(String(req.params.id), req.body?.decisions ?? req.body)));
   app.post("/studio/api/projects/:id/run", auth, body, wrap((req, _res, studio) =>
-    studio.run(String(req.params.id), String(req.body?.step), { only: Array.isArray(req.body?.only) ? req.body.only.map(Number) : undefined, model: req.body?.model })));
+    studio.run(String(req.params.id), Array.isArray(req.body?.step) ? req.body.step.map(String) : String(req.body?.step), { only: Array.isArray(req.body?.only) ? req.body.only.map(Number) : undefined, model: req.body?.model })));
   app.post("/studio/api/projects/:id/stop", auth, wrap((req, _res, studio) => ({ stopped: studio.stop(String(req.params.id)) })));
   app.get("/studio/api/projects/:id/log/:step", auth, wrap((req, _res, studio) => ({ log: studio.log(String(req.params.id), String(req.params.step), 400) })));
 
@@ -228,8 +228,8 @@ export function registerStudioTools(server: McpServer, baseUrl: string): void {
       style: z.string().optional(), characters: z.string().optional(), notes: z.string().optional() },
     ({ project: id, ...brief }, studio) => text(JSON.stringify(studio.setBrief(id, brief))));
 
-  tool("studio_run", "Run a remake step", "Start a step in the background: analyze, draft, cast, plates, stills, check, animate, soundtrack, final or compare; or a chain: all (draft to check), images (plates, stills, check), video (animate, soundtrack, final). only=[slots] limits stills or animate to those shots; model sets every animated shot's Seedance model (mini-720p, fast-720p, standard-720p, standard-1080p). Paid steps spend OpenRouter credit: read the estimates in studio_status first and confirm the cost with the user.",
-    { project, step: z.string(), only: z.array(z.number().int()).optional(), model: z.enum(["mini-720p", "fast-720p", "standard-720p", "standard-1080p"]).optional() },
+  tool("studio_run", "Run a remake step", "Start a step in the background: analyze, draft, cast, plates, stills, check, animate, soundtrack, final or compare; a chain: all (draft to check), images (plates, stills, check), video (animate, soundtrack, final); or a list of steps run in order (for example animate then final). only=[slots] limits stills or animate to those shots; model sets every animated shot's Seedance model (mini-720p, fast-720p, standard-720p, standard-1080p). Paid steps spend OpenRouter credit: read the estimates in studio_status first and confirm the cost with the user.",
+    { project, step: z.union([z.string(), z.array(z.string()).min(1).max(10)]), only: z.array(z.number().int()).optional(), model: z.enum(["mini-720p", "fast-720p", "standard-720p", "standard-1080p"]).optional() },
     ({ project: id, step, only, model }, studio) => text(JSON.stringify(studio.run(id, step, { only, model }))));
 
   tool("studio_stop", "Stop the running step", "Stop a project's running step.", { project }, ({ project: id }, studio) => text(JSON.stringify({ stopped: studio.stop(id) })));
@@ -259,8 +259,9 @@ export function registerStudioTools(server: McpServer, baseUrl: string): void {
       return { content };
     }, true);
 
-  tool("studio_media", "Fetch a project file's bytes", "A project file as base64 for a page to show (an artifact cannot load the server's URLs): the reference's playback copy reference/proxy.mp4, the cut's final/proxy.mp4, a clip slots/slot-03.mp4, or an image. At most 15 MB; videos are 640 px playback copies.",
-    { project, path: z.string() }, async ({ project: id, path }, studio) => {
+  tool("studio_media", "Fetch a project file's bytes", "A project file as base64 for a page to show (an artifact cannot load the server's URLs): the reference's playback copy reference/proxy.mp4, the cut's final/proxy.mp4, a clip slots/slot-03.mp4, or an image. At most 15 MB; videos are 640 px playback copies. width returns a JPEG of that width instead (an image, or a video's first frame).",
+    { project, path: z.string(), width: z.number().int().min(64).max(1280).optional() }, async ({ project: id, path, width }, studio) => {
+      if (width) return text(JSON.stringify({ path, mime: "image/jpeg", base64: (await readFile(studio.thumb(id, path, width))).toString("base64") }));
       const target = studio.file(id, path);
       const info = await stat(target).catch(() => undefined);
       if (!info?.isFile()) throw new Error(`No file at ${path}.`);

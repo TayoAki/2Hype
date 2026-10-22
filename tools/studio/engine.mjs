@@ -229,7 +229,8 @@ export function createStudio({ root, hypitHome, python = "python3", env = proces
   function run(id, step, options = {}) {
     const path = dir(id);
     if (running.has(id)) throw new Error(`${running.get(id).step} is already running`);
-    const steps = CHAINS[step] ?? [step];
+    const steps = Array.isArray(step) ? step : CHAINS[step] ?? [step];
+    if (!steps.length) throw new Error("no steps to run");
     for (const s of steps) if (!STEPS.some((x) => x.id === s)) throw new Error(`unknown step ${s}`);
     const job = { step: steps[0], steps, startedAt: now(), child: null, stopped: false };
     running.set(id, job);
