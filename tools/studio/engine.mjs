@@ -251,9 +251,12 @@ export function createStudio({ root, hypitHome, python = "python3", env = proces
           event(id, `${STEPS.find((x) => x.id === s).label}: done${cost > 0.001 ? ` ($${cost.toFixed(2)})` : ""}`);
         } catch (error) {
           const cost = Math.max(0, (await keyUsage()) - before);
-          update(id, (p) => { p.steps[s] = { ...p.steps[s], state: job.stopped ? "stopped" : "failed", finishedAt: now(), error: String(error.message ?? error).slice(0, 2000) };
+          let message = String(error.message ?? error);
+          // OpenRouter answers an unknown or revoked key with 401 "User not found": say which setting to fix.
+          if (/User not found|HTTP 401|No auth credentials/i.test(message)) message = `OpenRouter rejected the server's API key (${message.slice(0, 200)}). Put a current key in the OPENROUTER_API_KEY variable (Railway: the service's Variables) and run the step again.`;
+          update(id, (p) => { p.steps[s] = { ...p.steps[s], state: job.stopped ? "stopped" : "failed", finishedAt: now(), error: message.slice(0, 2000) };
             p.costs = { ...(p.costs ?? {}), [s]: Math.round(((p.costs?.[s] ?? 0) + cost) * 1000) / 1000 }; });
-          event(id, `${s} ${job.stopped ? "stopped" : `failed: ${String(error.message ?? error).slice(0, 200)}`}`);
+          event(id, `${s} ${job.stopped ? "stopped" : `failed: ${message.slice(0, 200)}`}`);
           break;
         }
       }
