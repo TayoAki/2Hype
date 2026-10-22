@@ -324,6 +324,10 @@ export function createStudio({ root, hypitHome, python = "python3", env = proces
       const p = load(id), ref = join(path, p.reference.file);
       await node(path, job, join(tools, "shot-list.mjs"), [ref, "--out", "analysis", "--analyze", "--template", "--spec", "--metrics", "--concurrency", "3"], { allowFail: true })
         .then((r) => { if (!existsSync(join(path, "analysis", "template.json"))) throw new Error(`analysis failed: ${r.out.trim().split("\n").slice(-3).join(" | ")}`); });
+      // shot-list keeps going when a shot can't be labelled; a remake can't follow a reference it couldn't read.
+      const shots = readJson(join(path, "analysis", "shots.json"), { shots: [] }).shots ?? [];
+      const failed = shots.filter((x) => x.analysisError);
+      if (shots.length && failed.length > shots.length / 2) throw new Error(`labelling failed for ${failed.length} of ${shots.length} shots: ${failed[0].analysisError}`);
       prepareAnalysis(id);
     },
 
