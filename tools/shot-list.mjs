@@ -34,7 +34,11 @@
 // detailed character designs. Motion and the colour palette are measured locally from the pixels. It also labels the
 // format variables a remake holds constant (people per shot, hands, medium, device, held prop, kind of setting, text
 // overlaid or in the scene, a zone-by-zone layout of screens and end cards), gives recurring characters and repeated
-// camera setups abstract ids (C1.., S1..), and reduces any voice to phrase timings and word counts.
+// camera setups abstract ids (C1.., S1..), and reduces any voice to phrase timings, word counts and phrase roles.
+// It also records featured people and extras, the main subject's facing, position, framing and expression, focus depth,
+// kinds of text, whose hands a close-up shows and each shot's brightness and saturation. Labels are voted: --passes
+// (default 2) passes from different frames, a tie-break pass when they disagree; continuity is labelled twice and only
+// agreed pairings stay; speech is transcribed from two encodings and only words both passes hear are counted.
 //
 // --own is for video the producer made or may adapt: --analyze then also keeps the full transcript (transcript.json and
 // transcript.srt with word timings), each shot's exact on-screen text and a detailed description, and full character
@@ -72,15 +76,23 @@ const LABELS = {
   held_prop: ["none", "phone", "product", "food", "bag-basket-cart", "tool", "other"],
   setting: ["retail-interior", "home-interior", "other-interior", "exterior-urban", "exterior-nature", "tabletop-studio", "plain-backdrop", "graphic", "other"],
   text_layer: ["none", "overlay", "in-world", "both"],
+  facing: ["toward-camera", "three-quarter", "profile", "away-from-camera", "none"],
+  subject_position: ["left", "center", "right", "none"],
+  subject_scale: ["full-body", "knees-up", "waist-up", "chest-up", "face", "detail", "none"],
+  expression: ["neutral", "happy", "excited", "surprised", "skeptical", "displeased", "focused", "none"],
+  depth_of_field: ["deep", "shallow"],
 };
+const TEXT_KINDS = ["logo", "price-sign", "screen-ui", "fine-print", "packaging", "overlay-title", "overlay-caption", "overlay-label", "other"];
 // Per-slot fields the template asks a remake to keep; --compare checks each one.
-const HOLD = ["people_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "text_layer"];
+const HOLD = ["people_count", "extras_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "text_layer", "text_kinds",
+  "facing", "subject_position", "subject_scale", "expression", "depth_of_field"];
 
 function usage(message) {
   if (message) console.error(`shot-list: ${message}\n`);
   console.error("Usage: node tools/shot-list.mjs <video> [--out <dir>] [--threshold 0.3] [--min-shot 0.25]\n" +
     "                     [--frame middle|first|last] [--width 540] [--columns 6] [--metrics]\n" +
-    "                     [--analyze [--model <openrouter model>] [--fallback-model <model>] [--concurrency 2]] [--template] [--spec] [--own]\n" +
+    "                     [--analyze [--model <openrouter model>] [--fallback-model <model>] [--passes 2] [--concurrency 2]]\n" +
+    "                     [--template] [--spec] [--own]\n" +
     "                     [--compare <reference shots.json>]\n" +
     "       node tools/shot-list.mjs --svml <filled-template.json> [--group 15] [--out <dir>]");
   process.exit(message ? 1 : 0);
@@ -89,9 +101,9 @@ function usage(message) {
 function parseArgs(argv) {
   const options = { threshold: 0.3, minShot: 0.25, frame: "middle", width: 540, columns: 6,
     analyze: false, template: false, metrics: false, spec: false, own: false, model: "google/gemini-2.5-flash", fallbackModel: "openai/gpt-4.1-mini",
-    concurrency: 2, group: 0 };
+    concurrency: 2, group: 0, passes: 2 };
   const values = { "--out": "out", "--threshold": "threshold", "--min-shot": "minShot", "--frame": "frame", "--width": "width",
-    "--columns": "columns", "--model": "model", "--fallback-model": "fallbackModel", "--concurrency": "concurrency", "--svml": "svml", "--group": "group", "--compare": "compare" };
+    "--columns": "columns", "--model": "model", "--fallback-model": "fallbackModel", "--concurrency": "concurrency", "--passes": "passes", "--svml": "svml", "--group": "group", "--compare": "compare" };
   const strings = new Set(["out", "frame", "model", "fallbackModel", "svml", "compare"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -122,6 +134,7 @@ function parseArgs(argv) {
   if (!(Number.isInteger(options.width) && options.width >= 64)) usage("--width must be a whole number of pixels, at least 64");
   if (!(Number.isInteger(options.columns) && options.columns >= 1)) usage("--columns must be a whole number");
   if (!(Number.isInteger(options.concurrency) && options.concurrency >= 1)) usage("--concurrency must be a whole number");
+  if (!(Number.isInteger(options.passes) && options.passes >= 1 && options.passes <= 5)) usage("--passes must be 1 to 5");
   if (options.compare !== undefined) options.analyze = options.metrics = true;
   if (options.analyze && !process.env.OPENROUTER_API_KEY) usage("--analyze needs the OPENROUTER_API_KEY environment variable");
   if (options.spec) options.template = options.metrics = true;
@@ -234,7 +247,8 @@ function palette(video, seconds) {
 const SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["shot_size", "angle", "camera_move", "subject", "person_on_screen", "lighting", "beat", "text_role", "text_position",
-    "people_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "text_layer", "layout_note"],
+    "people_count", "extras_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "text_layer", "text_kinds",
+    "facing", "subject_position", "subject_scale", "expression", "depth_of_field", "layout_note"],
   properties: {
     shot_size: { type: "string", enum: LABELS.shot_size },
     angle: { type: "string", enum: LABELS.angle },
@@ -246,18 +260,29 @@ const SCHEMA = {
     text_role: { type: "string", enum: LABELS.text_role },
     text_position: { type: "string", enum: LABELS.text_position },
     people_count: { type: "integer" },
+    extras_count: { type: "integer" },
     hands_in_frame: { type: "boolean" },
     medium: { type: "string", enum: LABELS.medium },
     device: { type: "string", enum: LABELS.device },
     held_prop: { type: "string", enum: LABELS.held_prop },
     setting: { type: "string", enum: LABELS.setting },
     text_layer: { type: "string", enum: LABELS.text_layer },
+    text_kinds: { type: "array", items: { type: "string", enum: TEXT_KINDS } },
+    facing: { type: "string", enum: LABELS.facing },
+    subject_position: { type: "string", enum: LABELS.subject_position },
+    subject_scale: { type: "string", enum: LABELS.subject_scale },
+    expression: { type: "string", enum: LABELS.expression },
+    depth_of_field: { type: "string", enum: LABELS.depth_of_field },
     layout_note: { type: "string" },
   },
 };
 
 /** Field guide shared by both labelling prompts. */
-const HOLD_GUIDE = `people_count: people or characters visible in the middle frame (partial bodies count; hands alone do not; 0 if none).
+const HOLD_GUIDE = `people_count: the featured people or characters in the middle frame, the ones the shot is about (partial bodies
+count; hands alone do not; 0 if none). extras_count: other people in the background who are not the focus (0 if none).
+facing, subject_position (horizontal third), subject_scale (how much of the main subject's body is in frame) and
+expression describe the main featured subject; "none" when there is no person. depth_of_field: "shallow" when the
+background is clearly blurred. text_kinds: every kind of text visible (an empty list when there is none).
 hands_in_frame: hands appear without their owner's face (a point-of-view insert). medium: how the shot was made
 (3d-animation includes clay or felt looks rendered in CG). device: "screen-closeup" when a phone or screen fills much
 of the frame, with or without hands; "held-up" when we see a character holding a phone or screen up; "in-background"
@@ -303,7 +328,11 @@ Return only the labels. Do not transcribe on-screen words, name people or brands
   for (const [key, allowed] of Object.entries(LABELS)) {
     if (key in labels && !allowed.includes(labels[key])) throw new Error(`model returned ${key}=${labels[key]}`);
   }
-  if (!(Number.isInteger(labels.people_count) && labels.people_count >= 0)) throw new Error(`model returned people_count=${labels.people_count}`);
+  for (const key of ["people_count", "extras_count"]) {
+    if (!(Number.isInteger(labels[key]) && labels[key] >= 0)) throw new Error(`model returned ${key}=${labels[key]}`);
+  }
+  if (!Array.isArray(labels.text_kinds) || labels.text_kinds.some((k) => !TEXT_KINDS.includes(k))) throw new Error(`model returned text_kinds=${labels.text_kinds}`);
+  labels.text_kinds = [...new Set(labels.text_kinds)].sort();
   // Hands holding a phone with no face in frame is a screen insert, whichever way the model phrased it.
   if (labels.device === "held-up" && labels.hands_in_frame && labels.people_count === 0) labels.device = "screen-closeup";
   labels.layout_note = words(labels.layout_note, 40);
@@ -322,34 +351,107 @@ const CONTINUITY_SCHEMA = {
  * Who recurs and which camera setups repeat, as abstract ids across the whole video (C1, C2... and S1, S2...).
  * Callbacks to a home setup and a recurring pair are format devices; the ids describe no one.
  */
-async function continuity(video, shots, model) {
+async function continuityPass(video, shots, model, at) {
   const content = [{ type: "text", text: `These are the middle frames of every shot of one video, in order. Give each recurring
 character an id C1, C2, ... in order of first appearance and list the ids visible in each shot (leave out background
-extras; use "hands" for hands without a face). Give each camera setup an id S1, S2, ...: two shots share a setup only
-when they show the same location from the same camera position and framing (a closer cut-in, a reverse angle or a new
-place is a new setup). Return every shot, ids only.` }];
+extras). For hands without a face write "hands:C2" when a sleeve, skin or prop shows whose hands they are, otherwise
+"hands". Give each camera setup an id S1, S2, ...: two shots share a setup only when they show the same location from
+the same camera position and framing (a closer cut-in, a reverse angle or a new place is a new setup). Return every
+shot, ids only.` }];
   for (const s of shots) {
     content.push({ type: "text", text: `Shot ${s.index}:` },
-      { type: "image_url", image_url: { url: `data:image/jpeg;base64,${grab(video, (s.start + s.end) / 2, "scale=320:-2", "jpeg").toString("base64")}` } });
+      { type: "image_url", image_url: { url: `data:image/jpeg;base64,${grab(video, s.start + at * (s.end - s.start), "scale=320:-2", "jpeg").toString("base64")}` } });
   }
   const json = await postOpenRouter(OPENROUTER, { model, temperature: 0, messages: [{ role: "user", content }],
     response_format: { type: "json_schema", json_schema: { name: "continuity", strict: true, schema: CONTINUITY_SCHEMA } } });
   const raw = json.choices?.[0]?.message?.content ?? "";
   const result = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+  const byShot = new Map();
   for (const entry of result.shots) {
-    const shot = shots.find((s) => s.index === entry.shot);
-    if (!shot) continue;
-    shot.characters = entry.characters.map((c) => String(c).trim()).filter((c) => /^(C\d+|hands)$/.test(c));
-    if (/^S\d+$/.test(entry.setup)) shot.setup = entry.setup;
+    byShot.set(entry.shot, { characters: entry.characters.map((c) => String(c).trim()).filter((c) => /^(C\d+|hands(:C\d+)?)$/.test(c)),
+      setup: /^S\d+$/.test(entry.setup) ? entry.setup : null });
   }
-  return { cost: json.usage?.cost ?? 0 };
+  return { byShot, cost: json.usage?.cost ?? 0 };
+}
+
+/** Grey 32x18 thumbnail, normalised, for comparing camera setups without a model. */
+function setupFeature(video, shot) {
+  const raw = grab(video, (shot.start + shot.end) / 2, "scale=32:18", "gray");
+  const values = [...raw], average = values.reduce((a, b) => a + b, 0) / values.length;
+  const spread = Math.sqrt(values.reduce((a, b) => a + (b - average) ** 2, 0) / values.length) || 1;
+  return values.map((v) => (v - average) / spread);
+}
+const similarity = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0) / a.length;
+
+/**
+ * Who recurs and which camera setups repeat, as abstract ids across the whole video (C1, C2... and S1, S2...).
+ * Two passes must agree: a setup pairing counts only when both passes make it and the frames look alike (a shot that
+ * resembles none of its group is split off), and a character keeps only the shots both passes give it. Callbacks to a
+ * home setup and a recurring pair are format devices; the ids describe no one.
+ */
+async function continuity(video, shots, models) {
+  const passes = [];
+  let cost = 0;
+  for (const model of models) {
+    // The two passes look at different moments of each shot (middle, then 40% in).
+    try { const pass = await continuityPass(video, shots, model, passes.length ? 0.4 : 0.5); passes.push(pass.byShot); cost += pass.cost; }
+    catch (error) { console.error(`  continuity (${model}): ${error.message}`); }
+    if (passes.length === 2) break;
+  }
+  if (!passes.length) throw new Error("no continuity pass succeeded");
+  if (passes.length === 1) passes.push(passes[0]);
+  const [a, b] = passes, index = shots.map((s) => s.index);
+  // Setups: union of pairs both passes agree on, kept only when the thumbnails correlate.
+  const features = new Map(shots.map((s) => [s.index, setupFeature(video, s)]));
+  const parent = new Map(index.map((i) => [i, i]));
+  const find = (i) => (parent.get(i) === i ? i : find(parent.get(i)));
+  const pairs = [];
+  for (let x = 0; x < index.length; x++) for (let y = x + 1; y < index.length; y++) {
+    const i = index[x], j = index[y];
+    const agreed = a.get(i)?.setup && a.get(i)?.setup === a.get(j)?.setup && b.get(i)?.setup && b.get(i)?.setup === b.get(j)?.setup;
+    const sim = similarity(features.get(i), features.get(j));
+    if (agreed && sim >= 0.33) { parent.set(find(j), find(i)); pairs.push([i, j, round(sim)]); }
+  }
+  let setupCount = 0;
+  const setupId = new Map();
+  for (const s of shots) {
+    const root = find(s.index);
+    if (!setupId.has(root)) setupId.set(root, `S${++setupCount}`);
+    s.setup = setupId.get(root);
+  }
+  // Characters: match each id of pass A to the id of pass B with the most shots in common; keep the shared shots.
+  const slotsOf = (pass) => {
+    const map = new Map();
+    for (const [shot, entry] of pass) for (const c of entry.characters) if (/^C\d+$/.test(c)) (map.get(c) ?? map.set(c, new Set()).get(c)).add(shot);
+    return map;
+  };
+  const sa = slotsOf(a), sb = slotsOf(b), mapping = new Map();
+  for (const [id, set] of sa) {
+    let best = null, bestShared = 0;
+    for (const [other, otherSet] of sb) { const shared = [...set].filter((x) => otherSet.has(x)).length; if (shared > bestShared) { best = other; bestShared = shared; } }
+    if (best) mapping.set(id, { other: best, shots: new Set([...set].filter((x) => sb.get(best).has(x))) });
+  }
+  const order = [...mapping.keys()].sort((x, y) => Math.min(...mapping.get(x).shots) - Math.min(...mapping.get(y).shots));
+  const rename = new Map(order.map((id, k) => [id, `C${k + 1}`]));
+  for (const s of shots) {
+    const ea = a.get(s.index), eb = b.get(s.index);
+    const cast = order.filter((id) => mapping.get(id).shots.has(s.index)).map((id) => rename.get(id));
+    // Hands keep their owner only when both passes name the same (matched) character.
+    const handsA = ea?.characters.find((c) => c.startsWith("hands")), handsB = eb?.characters.find((c) => c.startsWith("hands"));
+    if (handsA || handsB) {
+      const ownerA = handsA?.split(":")[1], ownerB = handsB?.split(":")[1];
+      cast.push(ownerA && ownerB && mapping.get(ownerA)?.other === ownerB ? `hands:${rename.get(ownerA)}` : "hands");
+    }
+    s.characters = cast;
+  }
+  return { cost, setupPairs: pairs };
 }
 
 /** Slot lists for every id that appears in more than one shot: the callbacks a remake should keep. */
 function recurrence(shots, key) {
   const map = {};
   for (const s of shots) for (const id of [s[key]].flat().filter(Boolean)) (map[id] ??= []).push(s.index);
-  return Object.fromEntries(Object.entries(map).filter(([id, slots]) => slots.length > 1 && id !== "hands"));
+  return Object.fromEntries(Object.entries(map).filter(([id, slots]) => slots.length > 1 && !id.startsWith("hands")));
 }
 
 async function postOpenRouter(url, body) {
@@ -392,25 +494,63 @@ async function analyse(video, shots, fps, options) {
       const times = [Math.min(shot.start + oneFrame, shot.end - oneFrame), (shot.start + shot.end) / 2, Math.max(shot.end - 2 * oneFrame, shot.start)];
       shot.motion = motionScore(video, times);
       shot.palette = palette(video, times[1]);
-      const frames = times.map((t) => grab(video, t, "scale=384:-2", "jpeg"));
-      // A truncated, off-schema or blocked answer gets one more try on the fallback model before the shot is skipped.
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const result = await labelShot(frames, shot, shots.length, attempt === 1 ? options.model : options.fallbackModel, options.own);
-          Object.assign(shot, result.labels);
-          cost += result.cost;
-          break;
-        } catch (error) {
-          if (attempt < 2) continue;
-          failures++;
-          shot.analysisError = error.message;
-          console.error(`  shot ${shot.index}: ${error.message}`);
+      // Each pass sees slightly different frames, so a repeated identical answer is real agreement, not a cache hit.
+      const clamp = (t) => Math.min(Math.max(t, shot.start), shot.end - oneFrame);
+      const frameSets = [times, [clamp(shot.start + 3 * oneFrame), clamp(shot.start + 0.4 * (shot.end - shot.start)), clamp(shot.end - 4 * oneFrame)]]
+        .map((set) => set.map((t) => grab(video, t, "scale=384:-2", "jpeg")));
+      let lastError, passNumber = 0;
+      // One pass: a truncated, off-schema or blocked answer gets one more try on the fallback model.
+      const pass = async () => {
+        const frames = frameSets[passNumber++ % frameSets.length];
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const result = await labelShot(frames, shot, shots.length, attempt === 1 ? options.model : options.fallbackModel, options.own);
+            cost += result.cost;
+            return result.labels;
+          } catch (error) {
+            lastError = error;
+          }
         }
+        return null;
+      };
+      // Several passes vote field by field; two passes that disagree get a third to break the tie.
+      const runs = [];
+      for (let i = 0; i < options.passes; i++) { const labels = await pass(); if (labels) runs.push(labels); }
+      if (runs.length === 2 && disagreements(runs).length) { const labels = await pass(); if (labels) runs.push(labels); }
+      if (!runs.length) {
+        failures++;
+        shot.analysisError = lastError?.message ?? "no labels";
+        console.error(`  shot ${shot.index}: ${shot.analysisError}`);
+        continue;
       }
+      Object.assign(shot, vote(runs));
+      shot.label_agreement = round(1 - disagreements(runs).length / Object.keys(runs[0]).length);
     }
   }
   await Promise.all(Array.from({ length: Math.min(options.concurrency, shots.length) }, worker));
   return { cost, failures };
+}
+
+/** Fields whose value differs between label passes (the free-text layout note aside). */
+function disagreements(runs) {
+  return Object.keys(runs[0]).filter((k) => k !== "layout_note" && k !== "description" && new Set(runs.map((r) => JSON.stringify(r[k]))).size > 1);
+}
+
+/** Majority per field: the median for counts, items most passes list for lists, the first non-empty note. */
+function vote(runs) {
+  const out = {};
+  for (const key of Object.keys(runs[0])) {
+    const values = runs.map((r) => r[key]);
+    if (key === "layout_note" || key === "description" || key === "on_screen_text") out[key] = values.find((v) => v) ?? "";
+    else if (Array.isArray(values[0])) out[key] = [...new Set(values.flat())].filter((v) => values.filter((list) => list.includes(v)).length * 2 > values.length).sort();
+    else if (typeof values[0] === "number") out[key] = [...values].sort((a, b) => a - b)[Math.floor((values.length - 1) / 2)];
+    else {
+      const counts = new Map();
+      for (const v of values) counts.set(JSON.stringify(v), (counts.get(JSON.stringify(v)) ?? 0) + 1);
+      out[key] = JSON.parse([...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]);
+    }
+  }
+  return out;
 }
 
 function tally(shots, key) {
@@ -444,6 +584,11 @@ function measureMetrics(video, shots, info) {
     if (time) { frames.push({ t: Number(time[1]) }); continue; }
     const stat = /lavfi\.signalstats\.(\w+)=([0-9.]+)/.exec(line);
     if (stat && frames.length) frames.at(-1)[stat[1]] = Number(stat[2]);
+  }
+  // Look per shot: mean brightness and saturation, held per slot by the template.
+  for (const shot of shots) {
+    const inside = frames.filter((f) => f.t >= shot.start && f.t < shot.end);
+    if (inside.length) { shot.brightness = round(mean(inside.map((f) => f.YAVG))); shot.saturation = round(mean(inside.map((f) => f.SATAVG))); }
   }
   // A cut's first frame differs from the last frame of the previous shot; leave those out of motion.
   const cutFrames = shots.slice(1).map((s) => s.start);
@@ -549,11 +694,21 @@ Do not transcribe speech or lyrics, and do not name songs, artists, people or br
     response_format: { type: "json_schema", json_schema: { name: "audio_labels", strict: true, schema: AUDIO_SCHEMA } } });
   const content = json.choices?.[0]?.message?.content ?? "";
   const labels = JSON.parse(content.slice(content.indexOf("{"), content.lastIndexOf("}") + 1));
-  let cost = json.usage?.cost ?? 0, pace = null, transcript = null, wordTimes = null;
+  let cost = json.usage?.cost ?? 0, pace = null, transcript = null, wordTimes = null, agreement = null;
   if (labels.voiceover || labels.music_vocals || own) {
-    const stt = await postOpenRouter(TRANSCRIPTIONS, { model: "elevenlabs/scribe-v2",
-      input_audio: { data, format: "mp3" }, response_format: "verbose_json", timestamp_granularities: ["word"] });
-    const words = (stt.words ?? []).filter((w) => (w.type ?? "word") === "word" && String(w.word).trim());
+    // Two transcriptions of two encodings; a word counts only when both hear it at the same moment. Runs have
+    // differed by a quarter of the words on the same file, so a single pass is not a stable word count.
+    const transcribe = async (audio) => {
+      const stt = await postOpenRouter(TRANSCRIPTIONS, { model: "elevenlabs/scribe-v2",
+        input_audio: { data: audio, format: "mp3" }, response_format: "verbose_json", timestamp_granularities: ["word"] });
+      cost += stt.usage?.cost ?? 0;
+      return (stt.words ?? []).filter((w) => (w.type ?? "word") === "word" && String(w.word).trim());
+    };
+    const second = run("ffmpeg", ["-hide_banner", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "22050", "-b:a", "64k", "-f", "mp3", "-"], "buffer").stdout;
+    const [first, other] = [await transcribe(data), await transcribe(second.toString("base64"))];
+    const middle = (w) => (w.start + w.end) / 2;
+    const words = first.filter((w) => other.some((o) => Math.abs(middle(o) - middle(w)) <= 0.25));
+    agreement = { first: first.length, second: other.length, kept: words.length };
     if (words.length) {
       const gaps = words.slice(1).map((w, i) => w.start - words[i].end);
       const spoken = words.at(-1).end - words[0].start;
@@ -562,9 +717,32 @@ Do not transcribe speech or lyrics, and do not name songs, artists, people or br
       wordTimes = words.map((w) => ({ start: round(w.start), end: round(w.end) }));
       if (own) transcript = words.map((w) => ({ word: String(w.word).trim(), start: round(w.start), end: round(w.end) }));
     }
-    cost += stt.usage?.cost ?? 0;
   }
-  return { labels, pace, transcript, wordTimes, cost };
+  return { labels, pace, transcript, wordTimes, agreement, cost, data };
+}
+
+const PHRASE_ROLES = ["hook", "problem", "offer", "benefit", "proof", "instruction", "call-to-action", "brand-tagline", "other"];
+const PHRASE_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["phrases"],
+  properties: { phrases: { type: "array", items: { type: "object", additionalProperties: false, required: ["phrase", "role", "energy"],
+    properties: { phrase: { type: "integer" }, role: { type: "string", enum: PHRASE_ROLES }, energy: { type: "string", enum: AUDIO_LABELS.voice_energy } } } } },
+};
+
+/** What each voice phrase does in the ad (hook, offer, call to action...), by role only. */
+async function phraseRoles(data, phrases, model) {
+  const list = phrases.map((p) => `${p.phrase}: ${p.start.toFixed(2)}s to ${p.end.toFixed(2)}s`).join("\n");
+  const text = `This soundtrack's voice speaks in these phrases:\n${list}\nFor each phrase give its role in the advert and its
+delivery energy. Roles only: do not transcribe or paraphrase the words.`;
+  const json = await postOpenRouter(OPENROUTER, { model, temperature: 0,
+    messages: [{ role: "user", content: [{ type: "text", text }, { type: "input_audio", input_audio: { data, format: "mp3" } }] }],
+    response_format: { type: "json_schema", json_schema: { name: "phrase_roles", strict: true, schema: PHRASE_SCHEMA } } });
+  const raw = json.choices?.[0]?.message?.content ?? "";
+  const result = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+  for (const entry of result.phrases) {
+    const phrase = phrases.find((p) => p.phrase === entry.phrase);
+    if (phrase && PHRASE_ROLES.includes(entry.role)) Object.assign(phrase, { role: entry.role, energy: entry.energy });
+  }
+  return json.usage?.cost ?? 0;
 }
 
 /** Voice phrases from word timings alone: a new phrase starts after a pause longer than 0.35 s. */
@@ -699,8 +877,16 @@ function holdConstant(summary, shots) {
   const fps = Math.round(summary.fps);
   rules.push(`Build the timeline at ${fps} fps (the reference runs at ${summary.fps}); slot startFrame and frames are in that rate, so generated 24 fps footage needs no frame repeats.`);
   if (shots.some((s) => s.people_count !== undefined)) {
-    rules.push(`People in frame per slot: ${shots.filter((s) => s.people_count !== undefined).map((s) => `${s.index}:${s.people_count}${s.hands_in_frame ? "+hands" : ""}`).join(" ")}. Match each count exactly.`);
+    rules.push(`Featured people per slot (+ background extras): ${shots.filter((s) => s.people_count !== undefined).map((s) => `${s.index}:${s.people_count}${s.extras_count ? `+${s.extras_count}` : ""}${s.hands_in_frame ? "+hands" : ""}`).join(" ")}. Match featured counts exactly and extras roughly.`);
+    const framed = shots.filter((s) => s.people_count > 0 && s.facing && s.facing !== "none");
+    if (framed.length) rules.push(`Framing of the main subject (facing, position, body in frame, expression): ${framed.map((s) => `${s.index}: ${s.facing}, ${s.subject_position}, ${s.subject_scale}, ${s.expression}`).join("; ")}.`);
   }
+  for (const s of shots) {
+    const owner = (s.characters ?? []).find((c) => c.startsWith("hands:"));
+    if (owner) rules.push(`Slot ${s.index} shows ${owner.slice(6)}'s own hands: the close-up is that character's point of view.`);
+  }
+  const shallow = shots.filter((s) => s.depth_of_field === "shallow").map((s) => s.index);
+  if (shallow.length) rules.push(`Shallow focus (blurred background) in slots ${shallow.join(", ")}; deep focus elsewhere.`);
   const characters = summary.continuity?.characters ?? {}, setups = summary.continuity?.setups ?? {};
   for (const [id, slots] of Object.entries(characters)) rules.push(`Recurring character ${id} appears in slots ${slots.join(", ")}: one of our characters fills that role in exactly those slots.`);
   for (const [id, slots] of Object.entries(setups)) rules.push(`Slots ${slots.join(", ")} repeat camera setup ${id}: shoot them in one location with the same camera position and framing.`);
@@ -714,10 +900,14 @@ function holdConstant(summary, shots) {
   const inWorld = shots.filter((s) => s.text_layer === "in-world" || s.text_layer === "both").map((s) => s.index);
   const overlay = shots.filter((s) => s.text_layer === "overlay" || s.text_layer === "both").map((s) => s.index);
   rules.push(`Text: overlays only in slots ${overlay.join(", ") || "none"}; text that is part of the scene (signs, screens) in ${inWorld.join(", ") || "none"}.`);
+  const kinds = [...new Set(shots.flatMap((s) => s.text_kinds ?? []))];
+  if (kinds.length) rules.push(`Kinds of text: ${kinds.map((k) => `${k} in ${shots.filter((s) => (s.text_kinds ?? []).includes(k)).map((s) => s.index).join(", ")}`).join("; ")}.`);
+  if (shots.some((s) => s.brightness !== undefined)) rules.push("Look: keep each slot's brightness within 20% and saturation within 35% of the slot values in template.json (palette and hue are ours).");
   const a = summary.audio;
   if (a?.voiceover) {
     const phrases = summary.voicePhrases ?? [];
-    rules.push(`Voice: ${a.voice_delivery} ${a.voice_gender} ${a.voice_age} voice, ${a.voice_energy} energy, ${phrases.length} phrase(s), ${summary.speechPace?.words ?? "?"} words${a.music_ducks_under_voice ? "; music ducks under it" : ""}. Write our own line for every phrase with the same word count (plus or minus one) at the same times.`);
+    const roles = phrases.map((p) => p.role).filter(Boolean);
+    rules.push(`Voice: ${a.voice_delivery} ${a.voice_gender} ${a.voice_age} voice, ${a.voice_energy} energy, ${phrases.length} phrase(s), ${summary.speechPace?.words ?? "?"} words${roles.length ? ` (${roles.join(" → ")})` : ""}${a.music_ducks_under_voice ? "; music ducks under it" : ""}. Write our own line for every phrase with the same word count (plus or minus one) and the same role, at the same times.`);
   } else if (a) {
     rules.push("No voiceover: music and effects only.");
   }
@@ -742,9 +932,12 @@ function writeTemplate(out, summary, shots) {
     ...(summary.metrics?.tempoBpm ? { music: { tempoBpm: summary.metrics.tempoBpm, firstBeat: summary.metrics.firstBeat,
       cutsOnHalfBeat: `${summary.metrics.cutsOnHalfBeat}/${summary.metrics.cutsMeasured}` } } : {}),
     continuity: summary.continuity ?? {},
+    // Fill these so --svml can name the same character and describe the same set in every slot that repeats it.
+    castMap: Object.fromEntries(Object.keys(summary.continuity?.characters ?? {}).map((id) => [id, ""])),
+    setupMap: Object.fromEntries(Object.keys(summary.continuity?.setups ?? {}).map((id) => [id, ""])),
     slots: shots.map((s) => ({ slot: s.index, start: round(s.start), duration: round(s.duration),
       startFrame: Math.round(s.start * fps), frames: Math.round(s.end * fps) - Math.round(s.start * fps),
-      ...Object.fromEntries([...GRAMMAR, ...HOLD, "characters", "setup", "layout_note", "motion", "vo_words"]
+      ...Object.fromEntries([...GRAMMAR, ...HOLD, "characters", "setup", "layout_note", "motion", "brightness", "saturation", "vo_words"]
         .filter((k) => s[k] !== undefined && s[k] !== "").map((k) => [k, s[k]])),
       ...(own ? { sourceFrame: s.frame, ...(s.on_screen_text ? { onScreenText: s.on_screen_text } : {}) } : {}),
       prompt: own && s.description ? s.description : "" })),
@@ -757,11 +950,11 @@ function writeTemplate(out, summary, shots) {
     "then run `node tools/shot-list.mjs --svml template.json` to write a Hypit project that generates new shots.", "",
     "## Hold constant", ...template.holdConstant.map((r) => `- ${r}`), "",
     "## Slots",
-    "| Slot | Frames | Beat | Size | Angle | Move | People | Cast | Setup | Medium | Device / prop | Text | VO words |",
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-    ...template.slots.map((s) => `| ${s.slot} | ${s.startFrame}+${s.frames} | ${cell(s, "beat")} | ${cell(s, "shot_size")} | ${cell(s, "angle")} | ${cell(s, "camera_move")} | ${cell(s, "people_count")}${s.hands_in_frame ? " +hands" : ""} | ${cell(s, "characters")} | ${cell(s, "setup")} | ${cell(s, "medium")} | ${[s.device, s.held_prop].filter((x) => x && x !== "none").join(", ")} | ${s.text_layer && s.text_layer !== "none" ? `${s.text_layer}${s.text_role && s.text_role !== "none" ? ` ${s.text_role} (${s.text_position})` : ""}` : ""} | ${cell(s, "vo_words")} |`),
-    ...(template.voiceover?.phrases?.length ? ["", "## Voice phrases (write our own line for each)", "| Phrase | Time | Words | Slots |", "|---|---|---|---|",
-      ...template.voiceover.phrases.map((p) => `| ${p.phrase} | ${p.start.toFixed(2)}s to ${p.end.toFixed(2)}s | ${p.words} | ${p.slots.join(", ")} |`)] : []),
+    "| Slot | Frames | Beat | Size | Angle | Move | People (+extras) | Facing, position, body, expression | Cast | Setup | Medium | Focus | Device / prop | Text | Look (Y / sat) | VO words |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ...template.slots.map((s) => `| ${s.slot} | ${s.startFrame}+${s.frames} | ${cell(s, "beat")} | ${cell(s, "shot_size")} | ${cell(s, "angle")} | ${cell(s, "camera_move")} | ${cell(s, "people_count")}${s.extras_count ? ` +${s.extras_count}` : ""}${s.hands_in_frame ? " +hands" : ""} | ${s.facing && s.facing !== "none" ? [s.facing, s.subject_position, s.subject_scale, s.expression].join(", ") : ""} | ${cell(s, "characters")} | ${cell(s, "setup")} | ${cell(s, "medium")} | ${cell(s, "depth_of_field")} | ${[s.device, s.held_prop].filter((x) => x && x !== "none").join(", ")} | ${[s.text_layer !== "none" && s.text_layer, ...(s.text_kinds ?? [])].filter(Boolean).join(", ")} | ${s.brightness !== undefined ? `${Math.round(s.brightness)} / ${Math.round(s.saturation)}` : ""} | ${cell(s, "vo_words")} |`),
+    ...(template.voiceover?.phrases?.length ? ["", "## Voice phrases (write our own line for each)", "| Phrase | Time | Words | Role | Energy | Slots |", "|---|---|---|---|---|---|",
+      ...template.voiceover.phrases.map((p) => `| ${p.phrase} | ${p.start.toFixed(2)}s to ${p.end.toFixed(2)}s | ${p.words} | ${p.role ?? ""} | ${p.energy ?? ""} | ${p.slots.join(", ")} |`)] : []),
     "",
   ].join("\n"));
 }
@@ -914,16 +1107,31 @@ function writeDelta(out, reference, summary, record, cuts, info) {
     check("audio", "voice type", `${ra.voice_gender}, ${ra.voice_age}`, `${oa.voice_gender}, ${oa.voice_age}`, ra.voice_gender === oa.voice_gender && ra.voice_age === oa.voice_age);
     check("audio", "voice phrases", ref.voicePhrases?.length ?? 0, summary.voicePhrases?.length ?? 0, Math.abs((ref.voicePhrases?.length ?? 0) - (summary.voicePhrases?.length ?? 0)) <= 1);
     check("audio", "voice words", ref.speechPace?.words ?? 0, summary.speechPace?.words ?? 0, near(ref.speechPace?.words ?? 0, summary.speechPace?.words ?? 0, 0.2));
+    const roles = (x) => (x.voicePhrases ?? []).map((p) => p.role).filter(Boolean).join(" → ");
+    if (roles(ref)) check("audio", "phrase roles", roles(ref), roles(summary) || "-", roles(ref) === roles(summary));
   }
   // Slot by slot.
   const ours = new Map(record.map((r) => [r.shot, r]));
   for (const r of theirs) {
     const o = ours.get(r.shot);
     if (!o) { check(`slot ${r.shot}`, "present", "yes", "missing", false); continue; }
-    const same = (field, a, b) => a === b || (field === "medium" && ["3d-animation", "stop-motion"].includes(a) && ["3d-animation", "stop-motion"].includes(b));
+    const same = (field, a, b) => {
+      if (field === "medium") return a === b || (["3d-animation", "stop-motion"].includes(a) && ["3d-animation", "stop-motion"].includes(b));
+      if (field === "extras_count") return Math.abs(a - (b ?? 0)) <= Math.max(2, a * 0.5);
+      if (Array.isArray(a)) return JSON.stringify(a.filter((k) => k !== "other")) === JSON.stringify((b ?? []).filter((k) => k !== "other"));
+      // With nobody in frame there is no subject to face, place or read.
+      if (["facing", "subject_position", "subject_scale", "expression"].includes(field) && r.people_count === 0) return true;
+      return a === b;
+    };
     for (const field of [...HOLD, "shot_size", "angle", "camera_move"]) {
-      if (r[field] !== undefined) check(`slot ${r.shot}`, field, r[field], o[field], same(field, r[field], o[field]));
+      if (r[field] !== undefined) check(`slot ${r.shot}`, field, show(r[field]), show(o[field]), same(field, r[field], o[field]));
     }
+    if (r.brightness !== undefined && o.brightness !== undefined) {
+      check(`slot ${r.shot}`, "brightness", r.brightness, o.brightness, near(r.brightness, o.brightness, 0.2));
+      if (r.saturation >= 8) check(`slot ${r.shot}`, "saturation", r.saturation, o.saturation, near(r.saturation, o.saturation, 0.35));
+    }
+    const owner = (x) => [x.characters ?? []].flat().some((c) => c.startsWith("hands:"));
+    if (owner(r)) check(`slot ${r.shot}`, "hands belong to a recurring character", "yes", owner(o) ? "yes" : "no", owner(o));
     if (r.motion !== undefined && o.motion !== undefined && Math.max(r.motion, o.motion) >= 0.5) {
       check(`slot ${r.shot}`, "motion", r.motion, o.motion, o.motion >= r.motion / 2 && o.motion <= r.motion * 2);
     }
@@ -987,14 +1195,33 @@ function writeSvml(templatePath, outOption, groupSeconds) {
   const MEDIUM = { "live-action": "Photoreal live-action footage", "stop-motion": "Stop-motion animation", "3d-animation": "3D animation",
     "2d-animation": "2D animation", "motion-graphics": "Motion graphics", mixed: "" };
   // template@2 hold-constant fields become plain instructions in each shot line.
+  const castMap = template.castMap ?? {}, setupMap = template.setupMap ?? {};
+  const PROP = { phone: "a phone", product: "a product", food: "food", "bag-basket-cart": "a shopping basket or cart", tool: "a tool" };
+  const SETTING = { "retail-interior": "inside a shop", "home-interior": "in a home", "other-interior": "indoors", "exterior-urban": "outdoors in town",
+    "exterior-nature": "outdoors in nature", "tabletop-studio": "on a tabletop", "plain-backdrop": "against a plain backdrop", graphic: "on a flat colour field" };
+  const SCALE = { "full-body": "full body in frame", "knees-up": "framed from the knees up", "waist-up": "framed from the waist up",
+    "chest-up": "framed from the chest up", face: "face fills the frame", detail: "a detail of the subject" };
+  // template@2 hold-constant fields become plain instructions in each shot line.
   const holdLine = (s) => {
     const parts = [];
+    const named = [s.characters ?? []].flat().filter((c) => /^C\d+$/.test(c) && castMap[c]).map((c) => castMap[c]);
+    if (named.length) parts.push(`Featuring ${named.join(" and ")}`);
+    const owner = [s.characters ?? []].flat().find((c) => c.startsWith("hands:"));
+    if (owner && castMap[owner.slice(6)]) parts.push(`the hands are ${castMap[owner.slice(6)]}'s own, seen from their point of view`);
+    if (s.setup && setupMap[s.setup]) parts.push(`Set: ${svmlText(setupMap[s.setup])}`);
     if (Number.isInteger(s.people_count)) {
       parts.push(s.people_count === 0 ? (s.hands_in_frame ? "Only hands in frame, no faces" : "No people in frame")
-        : `Exactly ${s.people_count} ${s.people_count === 1 ? "character" : "characters"} in frame${s.hands_in_frame ? ", plus hands" : ""}`);
+        : `Exactly ${s.people_count} main ${s.people_count === 1 ? "character" : "characters"} in frame${s.hands_in_frame ? ", plus hands" : ""}`);
+    }
+    if (Number.isInteger(s.extras_count)) parts.push(s.extras_count ? `about ${s.extras_count} background people` : "no background people");
+    if (s.people_count > 0 && s.facing && s.facing !== "none") {
+      parts.push(`the main character ${s.facing === "away-from-camera" ? "has their back to the camera" : s.facing === "toward-camera" ? "faces the camera" : `is seen in ${s.facing}`}, ${s.subject_position} of frame, ${SCALE[s.subject_scale] ?? s.subject_scale}${s.expression && s.expression !== "none" ? `, ${s.expression} expression` : ""}`);
     }
     if (s.device === "held-up") parts.push("a character holds up a phone with its screen facing camera");
-    if (s.device === "screen-closeup") parts.push("close-up of a phone held in hand; its screen is blank, plain light grey, for a graphic to be laid over it");
+    else if (s.device === "screen-closeup") parts.push("close-up of a phone held in hand; its screen is solid bright green, for a graphic to be laid over it");
+    else if (PROP[s.held_prop]) parts.push(`the main subject holds ${PROP[s.held_prop]}`);
+    if (SETTING[s.setting] && !(s.setup && setupMap[s.setup])) parts.push(SETTING[s.setting]);
+    if (s.depth_of_field === "shallow") parts.push("shallow depth of field, background softly blurred");
     return parts.length ? `${parts.join("; ")}.` : "";
   };
 
@@ -1106,15 +1333,13 @@ async function main() {
   if (options.analyze) {
     console.log(`Labelling ${shots.length} shots with ${options.model}...`);
     analysis = await analyse(video, shots, info.fps, options);
-    for (const model of [options.model, options.fallbackModel]) {
-      try {
-        analysis.cost += (await continuity(video, shots, model)).cost;
-        delete analysis.continuityError;
-        break;
-      } catch (error) {
-        analysis.continuityError = error.message;
-        console.error(`  continuity (${model}): ${error.message}`);
-      }
+    try {
+      const result = await continuity(video, shots, [options.model, options.model, options.fallbackModel, options.fallbackModel]);
+      analysis.cost += result.cost;
+      analysis.setupPairs = result.setupPairs;
+    } catch (error) {
+      analysis.continuityError = error.message;
+      console.error(`  continuity: ${error.message}`);
     }
     try {
       analysis.content = options.own ? await describeOwnContent(video, shots, options.model) : await summariseContent(video, shots, options.model);
@@ -1130,6 +1355,11 @@ async function main() {
         if (analysis.audio.wordTimes?.length) {
           voicePerShot(analysis.audio.wordTimes, shots);
           analysis.voicePhrases = voicePhrases(analysis.audio.wordTimes, shots);
+          try {
+            analysis.cost += await phraseRoles(analysis.audio.data, analysis.voicePhrases, options.model);
+          } catch (error) {
+            console.error(`  phrase roles: ${error.message}`);
+          }
         } else {
           for (const s of shots) { s.vo_words = 0; s.vo_seconds = 0; }
         }
@@ -1144,8 +1374,9 @@ async function main() {
   const record = shots.map((s) => ({
     shot: s.index, start: round(s.start), end: round(s.end), duration: round(s.duration),
     startTimecode: timecode(s.start, info.fps), endTimecode: timecode(s.end, info.fps), frameAt: round(s.frameAt), frame: s.frame,
-    ...(options.analyze ? Object.fromEntries([...Object.keys(SCHEMA.properties), "characters", "setup", "vo_words", "vo_seconds", "description", "on_screen_text", "motion", "palette", "analysisError"]
+    ...(options.analyze ? Object.fromEntries([...Object.keys(SCHEMA.properties), "characters", "setup", "vo_words", "vo_seconds", "description", "on_screen_text", "motion", "palette", "label_agreement", "analysisError"]
       .filter((k) => s[k] !== undefined).map((k) => [k, s[k]])) : {}),
+    ...(s.brightness !== undefined ? { brightness: s.brightness, saturation: s.saturation } : {}),
   }));
   const durations = shots.map((s) => s.duration);
   const divisor = (a, b) => (b ? divisor(b, a % b) : a);
@@ -1166,7 +1397,9 @@ async function main() {
       shotSizes: tally(shots, "shot_size"), cameraMoves: tally(shots, "camera_move"), subjects: tally(shots, "subject"), media: tally(shots, "medium"),
       continuity: { characters: recurrence(shots, "characters"), setups: recurrence(shots, "setup") },
       ...(analysis.continuityError ? { continuityError: analysis.continuityError } : {}),
-      ...(analysis.audio ? { audio: analysis.audio.labels, speechPace: analysis.audio.pace, voicePhrases: analysis.voicePhrases ?? [] } : {}),
+      ...(analysis.audio ? { audio: analysis.audio.labels, speechPace: analysis.audio.pace, voicePhrases: analysis.voicePhrases ?? [],
+        ...(analysis.audio.agreement ? { transcriptionAgreement: analysis.audio.agreement } : {}) } : {}),
+      ...(analysis.setupPairs ? { setupPairs: analysis.setupPairs } : {}),
       ...(analysis.audioError ? { audioError: analysis.audioError } : {}),
       ...(analysis.content ? { content: analysis.content.summary } : {}),
       ...(analysis.contentError ? { contentError: analysis.contentError } : {}),

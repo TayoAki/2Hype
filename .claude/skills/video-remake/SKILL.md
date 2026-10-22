@@ -22,7 +22,8 @@ The builder never looks at the reference. Everything flows through VIDEO_SPEC.md
 | Pacing curve, first-cut time, motion, brightness, saturation, contrast | Script and voiceover lines, deals and claims |
 | Loudness and true peak, voiceover presence and pace, music genre and tempo | Music (generated), voice (licensed preset) |
 | Where text sits and what role it plays, and whether it is overlaid or part of the scene | Every word on screen, every prompt |
-| People per slot, which slots share a recurring character, which slots repeat one camera setup | Who those characters are and where the set is |
+| People per slot (featured and background), which slots share a recurring character, whose hands a close-up shows, which slots repeat one camera setup | Who those characters are and where the set is |
+| Framing of the main subject per slot: facing, position, how much of the body, expression; focus depth; brightness and saturation | Poses, gestures, palette and hue |
 | Medium per slot (animation, live action, graphics), phone and screen inserts and held props, end-card layout by zone | The product, the app screens, the props themselves |
 | Voice phrase timing and word count per phrase, voice type and delivery, music tempo and beat sync | Every voice line (same word count, our words) |
 
@@ -87,9 +88,15 @@ This writes, under `analysis/reference/`:
 - `shots.json`, `shots.csv`: every cut with timecodes, plus per-shot labels, motion and palette
 - `frames/`, `contact-sheet.jpg`, `index.html`: one frame per shot, for the human reviewing the analysis
 - `template.json`, `template.md` (`shot-list.template@2`): the slot structure with an empty `prompt` per slot, the
-  frames of each slot at the timeline rate, a **Hold constant** list (people per slot, recurring characters, repeated
-  setups, medium changes, phone motif, screen and end-card layouts, overlay versus in-scene text, voice phrases,
-  tempo), and a voice phrase table with an empty `line` per phrase
+  frames of each slot at the timeline rate, a **Hold constant** list (featured people and extras per slot, framing
+  and expression of the main subject, recurring characters and whose hands each close-up shows, repeated setups,
+  medium changes, focus depth, phone motif, screen and end-card layouts, overlay versus in-scene text and its kinds,
+  brightness and saturation per slot, voice phrases with their roles, tempo), empty `castMap` and `setupMap` entries
+  for every recurring character and setup, and a voice phrase table with an empty `line` per phrase
+- Labels are voted: each shot is labelled twice from different frames and a third time when the two disagree
+  (`--passes`, `label_agreement` per shot); continuity is labelled twice and only agreed pairings are kept, with a
+  thumbnail check that splits off a "repeat" whose frame looks different; speech is transcribed from two encodings
+  and only words both hear are counted
 - `VIDEO_SPEC.md`: parts 1-4 and 4b filled with measured values; parts 5-7 left for us
 - with `--own`: `transcript.json` and `transcript.srt`, spec parts 4c (transcript) and 4d (shot descriptions and
   exact on-screen text), and prompts prefilled in `template.json`
@@ -120,13 +127,18 @@ Check the analysis before moving on:
      word count (plus or minus one) so it lands on the same slots. If the reference has a voiceover, ours has one.
    - Music brief: genre, tempo and energy may follow part 4; the track is generated new.
    - Text system: a font, size, colour and position for each text role in part 3; all copy is ours.
+   - Fill `castMap` (our character for each recurring id, for example `"C1": "Pip"`) and `setupMap` (one
+     description of our set per repeated setup). `--svml` then names the same character and describes the same set in
+     every slot that repeats it, and writes each slot's framing, expression, extras, prop, setting and focus.
    - Slot prompts: write `prompt` for every slot in `template.json`. Keep each slot's timing, grammar and every
      Hold constant line: the same number of people, our recurring character in the same slots, one set and camera
      position for slots that repeat a setup, the same medium (a live-action food macro stays live action), a phone
      held up where theirs is, and text in the scene where theirs is in the scene. Add a template-level `"style"`
      line (or `"styleByMedium"`) and `"references"` for character and set sheets (see Phase 3).
-   - Screen inserts: when the reference shows a hand holding a phone, generate a hand holding a phone with a blank
-     screen (`--svml` asks for that) and lay our designed screen over it; a flat graphic card is a different shot.
+   - Screen inserts: when the reference shows a hand holding a phone, generate that hand (the same character's
+     sleeve when the template names an owner) holding a phone with a solid green screen (`--svml` asks for that), then
+     key the green and lay our designed screen into it, so a tapping finger stays in front. A flat graphic card is a
+     different shot.
 3. **Part 6, production plan**: models, seconds and quotes. Group slots into multi-shot clips (`--group 15`);
    Seedance bills at least 4 seconds per clip, so one clip per short slot can cost two to three times as much.
 4. **Part 7, originality checklist** (or, with `--own`, the rights checklist): tick every box before any paid step.
@@ -247,7 +259,7 @@ Known gaps: {anything not matched, substituted or covered}
 
 `OPENROUTER_BASE_URL` points `tools/shot-list.mjs` at any OpenRouter-compatible server. A small local mock that
 answers `/chat/completions` by `response_format.json_schema.name` (`shot_labels`, `own_shot_labels`,
-`continuity`, `audio_labels`, `content_summary`, `own_content`) and `/audio/transcriptions` with a `words` array
+`continuity`, `phrase_roles`, `audio_labels`, `content_summary`, `own_content`) and `/audio/transcriptions` with a `words` array
 exercises the whole `--analyze --spec` and `--compare` paths, with and without `--own`, at no cost.
 
 ## Error handling and lessons
@@ -289,6 +301,7 @@ exercises the whole `--analyze --spec` and `--compare` paths, with and without `
 | Date | Changes |
 | --- | --- |
 | 2026-10-22 | Template@2: Hold constant variables per slot (people, hands, medium, device, prop, setting, text layer, layout), continuity (recurring characters, repeated setups), voice phrase map, measured tempo and beat sync, timeline fps; `--compare` writes DELTA.md; `--svml` uses the new fields; fallback labelling model. |
+| 2026-10-22 | Framing, expression, extras, focus, kinds of text, per-slot look, hands owner and phrase roles in the template; voted labels, agreed continuity with a thumbnail check, two-encoding transcription; `castMap`/`setupMap` in `--svml`; green-screen phone inserts. |
 | 2026-10-22 | Lessons for cutting multi-shot generated clips into measured slots (Pepper Lane v3 madlib build). |
 | 2026-10-22 | Two-stage builds (`hypit-stage.mjs clips`/`final`), preflight `lint` and `doctor`, failure protocol with `recover`, the provider job ledger, and frame-exact format matching with all compositions, poses, choreography and characters our own. |
 | 2026-10-20 | Own-content mode (`--own`): transcript, exact on-screen text, shot descriptions, full designs, prefilled prompts, rights checklist. Dropped connections are retried; `OPENROUTER_BASE_URL` for mock testing. |
