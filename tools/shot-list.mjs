@@ -58,12 +58,13 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // OPENROUTER_BASE_URL points the tool at another OpenRouter-compatible server, for example a local mock in tests.
 const OPENROUTER_BASE = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-const OPENROUTER = `${OPENROUTER_BASE}/chat/completions`;
+export const OPENROUTER = `${OPENROUTER_BASE}/chat/completions`;
 const TRANSCRIPTIONS = `${OPENROUTER_BASE}/audio/transcriptions`;
-const LABELS = {
+export const LABELS = {
   shot_size: ["extreme-wide", "wide", "medium", "close-up", "extreme-close-up"],
   angle: ["eye-level", "high", "low", "overhead", "aerial", "pov"],
   camera_move: ["static", "handheld", "pan", "tilt", "push-in", "pull-out", "tracking", "orbit", "zoom", "unclear"],
@@ -84,9 +85,9 @@ const LABELS = {
   expression: ["neutral", "happy", "excited", "surprised", "skeptical", "displeased", "focused", "none"],
   depth_of_field: ["deep", "shallow"],
 };
-const TEXT_KINDS = ["logo", "price-sign", "screen-ui", "fine-print", "packaging", "overlay-title", "overlay-caption", "overlay-label", "other"];
+export const TEXT_KINDS = ["logo", "price-sign", "screen-ui", "fine-print", "packaging", "overlay-title", "overlay-caption", "overlay-label", "other"];
 // Per-slot fields the template asks a remake to keep; --compare checks each one.
-const HOLD = ["people_count", "extras_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "text_layer", "text_kinds",
+export const HOLD = ["people_count", "extras_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "text_layer", "text_kinds",
   "facing", "subject_position", "subject_scale", "expression", "depth_of_field"];
 
 function usage(message) {
@@ -95,7 +96,7 @@ function usage(message) {
     "                     [--frame middle|first|last] [--width 540] [--columns 6] [--metrics]\n" +
     "                     [--analyze [--model <openrouter model>] [--fallback-model <model>] [--passes 2] [--concurrency 2]]\n" +
     "                     [--template] [--spec] [--own]\n" +
-    "                     [--compare <reference shots.json>]\n" +
+    "                     [--compare <reference shots.json> [--waivers <filled template.json>]]\n" +
     "       node tools/shot-list.mjs --svml <filled-template.json> [--group 15] [--group-by time|setup] [--margin 0.25] [--out <dir>]");
   process.exit(message ? 1 : 0);
 }
@@ -105,8 +106,8 @@ function parseArgs(argv) {
     analyze: false, template: false, metrics: false, spec: false, own: false, model: "google/gemini-2.5-flash", fallbackModel: "openai/gpt-4.1-mini",
     concurrency: 2, group: 0, passes: 2, groupBy: "time", margin: 0.25 };
   const values = { "--out": "out", "--threshold": "threshold", "--min-shot": "minShot", "--frame": "frame", "--width": "width",
-    "--columns": "columns", "--model": "model", "--fallback-model": "fallbackModel", "--concurrency": "concurrency", "--passes": "passes", "--svml": "svml", "--group-by": "groupBy", "--margin": "margin", "--group": "group", "--compare": "compare" };
-  const strings = new Set(["out", "frame", "model", "fallbackModel", "svml", "compare", "groupBy"]);
+    "--columns": "columns", "--model": "model", "--fallback-model": "fallbackModel", "--concurrency": "concurrency", "--passes": "passes", "--svml": "svml", "--group-by": "groupBy", "--margin": "margin", "--group": "group", "--compare": "compare", "--waivers": "waivers" };
+  const strings = new Set(["out", "frame", "model", "fallbackModel", "svml", "compare", "groupBy", "waivers"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") usage();
@@ -153,7 +154,7 @@ function run(command, args, encoding = "utf8") {
   return result;
 }
 
-function probe(video) {
+export function probe(video) {
   const { stdout } = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries",
     "stream=width,height,r_frame_rate:format=duration", "-of", "json", video]);
   const info = JSON.parse(stdout);
@@ -164,7 +165,7 @@ function probe(video) {
 }
 
 /** Times (seconds) where ffmpeg's scene score crosses the threshold. */
-function detectCuts(video, threshold) {
+export function detectCuts(video, threshold) {
   const { stderr } = run("ffmpeg", ["-hide_banner", "-nostats", "-i", video, "-an", "-sn",
     "-vf", `select='gt(scene\\,${threshold})',showinfo`, "-f", "null", "-"]);
   return [...stderr.matchAll(/pts_time:([0-9.]+)/g)].map((match) => Number(match[1]));
@@ -197,12 +198,12 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[c]);
 }
 
-const round = (n) => Math.round(n * 1000) / 1000;
+export const round = (n) => Math.round(n * 1000) / 1000;
 
 // ---------- analysis ----------
 
 /** One frame at `seconds`, scaled, as encoded image bytes or raw pixels. */
-function grab(video, seconds, filter, format) {
+export function grab(video, seconds, filter, format) {
   const output = format === "jpeg" ? ["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "4"] : ["-f", "rawvideo", "-pix_fmt", format];
   // A seek into the last frame or two of a file can return nothing; step back a tenth of a second at a time.
   for (let t = seconds, tries = 0; ; t = Math.max(0, t - 0.1), tries++) {
@@ -249,7 +250,7 @@ function palette(video, seconds) {
   return centres.map((c, k) => ({ c, n: groups[k].length })).sort((a, b) => b.n - a.n).map((e) => hex(e.c));
 }
 
-const SCHEMA = {
+export const SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["shot_size", "angle", "camera_move", "subject", "person_on_screen", "lighting", "beat", "text_role", "text_position",
     "people_count", "extras_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "text_layer", "text_kinds",
@@ -283,7 +284,7 @@ const SCHEMA = {
 };
 
 /** Field guide shared by both labelling prompts. */
-const HOLD_GUIDE = `people_count: the featured people or characters in the middle frame, the ones the shot is about (partial bodies
+export const HOLD_GUIDE = `people_count: the featured people or characters in the middle frame, the ones the shot is about (partial bodies
 count; hands alone do not; 0 if none). extras_count: other people in the background who are not the focus (0 if none).
 facing, subject_position (horizontal third), subject_scale (how much of the main subject's body is in frame) and
 expression describe the main featured subject; "none" when there is no person. depth_of_field: "shallow" when the
@@ -386,7 +387,7 @@ function setupFeature(video, shot) {
   const spread = Math.sqrt(values.reduce((a, b) => a + (b - average) ** 2, 0) / values.length) || 1;
   return values.map((v) => (v - average) / spread);
 }
-const similarity = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0) / a.length;
+export const similarity = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0) / a.length;
 
 /**
  * Who recurs and which camera setups repeat, as abstract ids across the whole video (C1, C2... and S1, S2...).
@@ -459,7 +460,7 @@ function recurrence(shots, key) {
   return Object.fromEntries(Object.entries(map).filter(([id, slots]) => slots.length > 1 && !id.startsWith("hands")));
 }
 
-async function postOpenRouter(url, body) {
+export async function postOpenRouter(url, body) {
   for (let attempt = 1; ; attempt++) {
     let response;
     try {
@@ -726,7 +727,7 @@ Do not transcribe speech or lyrics, and do not name songs, artists, people or br
   return { labels, pace, transcript, wordTimes, agreement, cost, data };
 }
 
-const PHRASE_ROLES = ["hook", "problem", "offer", "benefit", "proof", "instruction", "call-to-action", "brand-tagline", "other"];
+export const PHRASE_ROLES = ["hook", "problem", "offer", "benefit", "proof", "instruction", "call-to-action", "brand-tagline", "other"];
 const PHRASE_SCHEMA = {
   type: "object", additionalProperties: false, required: ["phrases"],
   properties: { phrases: { type: "array", items: { type: "object", additionalProperties: false, required: ["phrase", "role", "energy"],
@@ -1078,10 +1079,27 @@ function ownSpecSections(summary, shots) {
  * DELTA.md: our render measured on the reference's slots, every format variable checked against the reference
  * analysis (shots.json from the same tool version). Lists each miss, then the slot-by-slot table.
  */
-function writeDelta(out, reference, summary, record, cuts, info) {
+// The variables that carry the format: who and how many are in each shot, where it is, how it is framed, which shots
+// return to the same setup or character, where the cuts fall, and the voice's structure. A render is judged on these
+// first; the rest (expression, text kinds, look, motion) are reported but never hide a broken format.
+const CRITICAL = new Set(["people_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "shot_size", "facing", "subject_scale",
+  "hard cut at slot start", "no cut inside the slot", "duration", "voiceover", "phrase roles", "present"]);
+const isCritical = (field) => CRITICAL.has(field) || field.startsWith("repeat one camera setup") || field.startsWith("one recurring character");
+
+export function writeDelta(out, reference, summary, record, cuts, info, waivers) {
   const ref = reference.summary, theirs = reference.shots, misses = [];
-  let total = 0;
-  const check = (scope, field, a, b, pass) => { total++; if (!pass) misses.push({ scope, field, reference: a, ours: b }); };
+  let total = 0, criticalTotal = 0;
+  // A filled template's slot "waive": { field: reason } marks a deliberate difference; it stays listed, marked waived.
+  const waived = (scope, field) => {
+    const n = /^slot (\d+)$/.exec(scope)?.[1];
+    return n ? waivers?.slots?.find((x) => x.slot === Number(n))?.waive?.[field] : undefined;
+  };
+  const check = (scope, field, a, b, pass) => {
+    total++;
+    const critical = isCritical(field);
+    if (critical) criticalTotal++;
+    if (!pass) misses.push({ scope, field, reference: a, ours: b, critical, ...(waived(scope, field) ? { waived: waived(scope, field) } : {}) });
+  };
   const show = (v) => (v === undefined || v === null ? "-" : Array.isArray(v) ? v.join(" ") || "-" : String(v));
   const near = (a, b, share) => a !== undefined && b !== undefined && Math.abs(a - b) <= Math.abs(a) * share;
   const frame = 1 / Math.min(info.fps, ref.fps);
@@ -1155,11 +1173,19 @@ function writeDelta(out, reference, summary, record, cuts, info) {
   }
 
   const passed = total - misses.length;
+  const criticalMisses = misses.filter((m) => m.critical && !m.waived);
+  const criticalPassed = criticalTotal - misses.filter((m) => m.critical).length;
+  const waivedCount = misses.filter((m) => m.waived).length;
+  const row = (m) => `| ${m.scope} | ${m.field}${m.waived ? ` (waived: ${m.waived})` : ""} | ${show(m.reference)} | ${show(m.ours)} |`;
   const lines = [
     `# Delta: ${summary.video} against ${ref.video}`, "",
-    `${passed} of ${total} format checks match. Each miss below is a variable the template holds constant.`, "",
-    "## Misses", "| Where | Variable | Reference | Ours |", "|---|---|---|---|",
-    ...misses.map((m) => `| ${m.scope} | ${m.field} | ${show(m.reference)} | ${show(m.ours)} |`), "",
+    `**Format-critical: ${criticalPassed} of ${criticalTotal} match${waivedCount ? ` (${misses.filter((m) => m.critical && m.waived).length} more waived)` : ""}.** ` +
+      `${criticalMisses.length ? "The render does not follow the reference until every critical miss below is fixed or waived." : "Every critical variable follows the reference."}`, "",
+    `All checks: ${passed} of ${total} match. Each miss below is a variable the template holds constant.`, "",
+    "## Critical misses", "| Where | Variable | Reference | Ours |", "|---|---|---|---|",
+    ...(misses.filter((m) => m.critical).map(row)), "",
+    "## Other misses (reported, not blocking)", "| Where | Variable | Reference | Ours |", "|---|---|---|---|",
+    ...misses.filter((m) => !m.critical).map(row), "",
     "## Slot by slot (reference / ours)",
     "| Slot | People | Medium | Device / prop | Setting | Text | Size | Motion | VO words | Setup | Cast |", "|---|---|---|---|---|---|---|---|---|---|---|",
     ...theirs.map((r) => {
@@ -1170,43 +1196,25 @@ function writeDelta(out, reference, summary, record, cuts, info) {
     }), "",
   ];
   writeFileSync(join(out, "DELTA.md"), lines.join("\n"));
-  writeFileSync(join(out, "delta.json"), `${JSON.stringify({ reference: ref.video, ours: summary.video, total, passed, misses }, null, 2)}\n`);
-  console.log(`Delta: ${passed} of ${total} format checks match; ${misses.length} miss(es) in DELTA.md`);
+  writeFileSync(join(out, "delta.json"), `${JSON.stringify({ reference: ref.video, ours: summary.video, total, passed, criticalTotal, criticalPassed,
+    criticalOpen: criticalMisses.length, waived: waivedCount, misses }, null, 2)}\n`);
+  console.log(`Delta: format-critical ${criticalPassed} of ${criticalTotal} (${criticalMisses.length} open${waivedCount ? `, ${waivedCount} waived` : ""}); all checks ${passed} of ${total}; see DELTA.md`);
+  if (criticalMisses.length) process.exitCode = 2;
 }
 
 /** Text safe inside an SVML text:Value body. */
-function svmlText(text) {
+export function svmlText(text) {
   return String(text).replace(/[{}]/g, "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").trim();
 }
 
-function writeSvml(templatePath, outOption, groupSeconds, groupBy = "time", margin = 0.25) {
-  const template = JSON.parse(readFileSync(templatePath, "utf8"));
-  if (!["shot-list.template@1", "shot-list.template@2"].includes(template.format)) throw new Error(`${templatePath} is not a shot-list template`);
-  const empty = template.slots.filter((s) => !String(s.prompt ?? "").trim()).map((s) => s.slot);
-  if (empty.length) throw new Error(`fill the prompt of slot${empty.length > 1 ? "s" : ""} ${empty.join(", ")} first`);
-  const long = template.slots.filter((s) => s.duration > 15).map((s) => s.slot);
-  if (long.length) throw new Error(`slot${long.length > 1 ? "s" : ""} ${long.join(", ")} run longer than Seedance's 15s; split them`);
-  const fps = template.timelineFps ?? Math.round(template.fps ?? 30);
-  const [rw, rh] = String(template.aspectRatio ?? "9:16").split(":").map(Number);
-  const portrait = rh >= rw;
-  const ratio = portrait ? "9:16" : "16:9";
-  const canvas = portrait ? [1080, 1920] : [1920, 1080];
-  const variant = template.seedance?.model ?? "mini";
-  const resolution = template.seedance?.resolution ?? "720p";
-  const references = template.references ?? [];
-  for (const r of references) if (typeof r.path !== "string" || typeof r.personReference !== "boolean") throw new Error("each reference needs a path and a personReference boolean");
-  const pad = (n) => String(n).padStart(2, "0");
-  const punctuate = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
-  const MEDIUM = { "live-action": "Photoreal live-action footage", "stop-motion": "Stop-motion animation", "3d-animation": "3D animation",
-    "2d-animation": "2D animation", "motion-graphics": "Motion graphics", mixed: "" };
-  // template@2 hold-constant fields become plain instructions in each shot line.
+/** template@2 hold-constant fields as one plain instruction line per slot (cast, set, counts, framing, device, focus). */
+export function holdLineFor(template) {
   const castMap = template.castMap ?? {}, setupMap = template.setupMap ?? {};
   const PROP = { phone: "a phone", product: "a product", food: "food", "bag-basket-cart": "a shopping basket or cart", tool: "a tool" };
   const SETTING = { "retail-interior": "inside a shop", "home-interior": "in a home", "other-interior": "indoors", "exterior-urban": "outdoors in town",
     "exterior-nature": "outdoors in nature", "tabletop-studio": "on a tabletop", "plain-backdrop": "against a plain backdrop", graphic: "on a flat colour field" };
   const SCALE = { "full-body": "full body in frame", "knees-up": "framed from the knees up", "waist-up": "framed from the waist up",
     "chest-up": "framed from the chest up", face: "face fills the frame", detail: "a detail of the subject" };
-  // template@2 hold-constant fields become plain instructions in each shot line.
   const screenLine = template.screenLine ? svmlText(template.screenLine) : "";
   const holdLine = (s) => {
     const parts = [];
@@ -1230,6 +1238,31 @@ function writeSvml(templatePath, outOption, groupSeconds, groupBy = "time", marg
     if (s.depth_of_field === "shallow") parts.push("shallow depth of field, background softly blurred");
     return parts.length ? `${parts.join("; ")}.` : "";
   };
+
+  return holdLine;
+}
+
+function writeSvml(templatePath, outOption, groupSeconds, groupBy = "time", margin = 0.25) {
+  const template = JSON.parse(readFileSync(templatePath, "utf8"));
+  if (!["shot-list.template@1", "shot-list.template@2"].includes(template.format)) throw new Error(`${templatePath} is not a shot-list template`);
+  const empty = template.slots.filter((s) => !String(s.prompt ?? "").trim()).map((s) => s.slot);
+  if (empty.length) throw new Error(`fill the prompt of slot${empty.length > 1 ? "s" : ""} ${empty.join(", ")} first`);
+  const long = template.slots.filter((s) => s.duration > 15).map((s) => s.slot);
+  if (long.length) throw new Error(`slot${long.length > 1 ? "s" : ""} ${long.join(", ")} run longer than Seedance's 15s; split them`);
+  const fps = template.timelineFps ?? Math.round(template.fps ?? 30);
+  const [rw, rh] = String(template.aspectRatio ?? "9:16").split(":").map(Number);
+  const portrait = rh >= rw;
+  const ratio = portrait ? "9:16" : "16:9";
+  const canvas = portrait ? [1080, 1920] : [1920, 1080];
+  const variant = template.seedance?.model ?? "mini";
+  const resolution = template.seedance?.resolution ?? "720p";
+  const references = template.references ?? [];
+  for (const r of references) if (typeof r.path !== "string" || typeof r.personReference !== "boolean") throw new Error("each reference needs a path and a personReference boolean");
+  const pad = (n) => String(n).padStart(2, "0");
+  const punctuate = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
+  const MEDIUM = { "live-action": "Photoreal live-action footage", "stop-motion": "Stop-motion animation", "3d-animation": "3D animation",
+    "2d-animation": "2D animation", "motion-graphics": "Motion graphics", mixed: "" };
+  const holdLine = holdLineFor(template);
 
   if (groupBy === "setup") return writeSetupClips(template, templatePath, outOption, groupSeconds, margin, { holdLine, punctuate, pad, MEDIUM, references, variant, resolution, ratio, fps });
 
@@ -1528,7 +1561,8 @@ ${record.map((r) => `  <figure><img src="${r.frame}" alt="Shot ${r.shot}" loadin
 `);
   if (options.template) writeTemplate(out, summary, shots);
   if (options.spec) writeSpec(out, summary, shots);
-  if (reference) writeDelta(out, reference, summary, record, cuts, info);
+  const waivers = options.waivers ? JSON.parse(readFileSync(resolve(options.waivers), "utf8")) : null;
+  if (reference) writeDelta(out, reference, summary, record, cuts, info, waivers);
 
   console.log(`${summary.shots} shots in ${summary.duration}s (average ${summary.averageShot}s, shortest ${summary.shortestShot}s, longest ${summary.longestShot}s)`);
   for (const r of record) {
@@ -1547,7 +1581,10 @@ ${record.map((r) => `  <figure><img src="${r.frame}" alt="Shot ${r.shot}" loadin
   if (analysis?.failures || analysis?.audioError || analysis?.contentError || analysis?.continuityError) process.exitCode = 2;
 }
 
-main().catch((error) => {
-  console.error(`shot-list: ${error.message}`);
-  process.exit(1);
-});
+// Run only as a command; tools/keyframes.mjs and tools/review.mjs import the labels and helpers.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`shot-list: ${error.message}`);
+    process.exit(1);
+  });
+}

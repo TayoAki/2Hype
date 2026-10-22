@@ -163,24 +163,51 @@ Read VIDEO_SPEC.md and template.json completely before writing a file. Build onl
   character", "personReference": true }, { "path": "./references/store.png", "role": "is the store",
   "personReference": false }]`.
 
-### 3b. Picture
+### 3b. Picture: lock every shot as a still, then animate it
 
-For a template@2 reference (repeated setups, recurring cast), generate by setup and assemble:
+Text prompts cannot hold a set, a framing or a head count across shots: a multi-shot clip invents its own set for
+each shot, and a render that passes 385 of 464 checks can still have broken every repeated setup. So every shot is
+made as a still first, checked against its reference slot, approved by the producer, and only then animated.
 
-```bash
-node /app/tools/shot-list.mjs --svml template.json --group 15 --group-by setup --margin 0.25 --out .
-# build clips.svrun (paid, 3d), export each clip to assets/takes/<clip id>.mp4, then:
-node /app/tools/assemble.mjs --plan clips-plan.json --template template.json --takes assets/takes --out assets/slots
-```
+1. **Fill the template to the reference.** Each slot's prompt names the action at the slot's setup; `firstFrame`
+   says what the opening still shows when the prompt describes a movement. Give `references[].kind` (`cast`, `set`,
+   `style`, `screen`), `setupReferences` (which set images go with which setup's plate) and `screenDesigns` for
+   screen close-ups. Design app screens from the slot's `layout_note` (same zones, element count and relative
+   sizes), large enough to read at 720p. A deliberate difference from the reference goes in the slot's
+   `"waive": { "<field>": "<reason>" }`; anything not waived must match.
+2. **Plates** (one empty-set still per setup the reference repeats, at the setup's framing):
+   `node /app/tools/keyframes.mjs plates template.json --out .` → build `plates.svrun`, fetch each
+   `plate-<setup>.image` to `stills/plate-<setup>.png`, look at them.
+3. **Opening stills** (each shot on its plate, with only its own characters' sheets; close-ups get a plain white
+   screen and a last frame with the fingertip on the button):
+   `node /app/tools/keyframes.mjs stills template.json --out . --stills stills` → build `stills.svrun`, fetch every
+   output to `stills/<id>.png`. Then `keyframes.mjs screens template.json --stills stills --python <python with cv2>`
+   lays the app designs on the close-ups (the after screen on the last frame, so the clip animates the tap).
+4. **Gate:** `node /app/tools/keyframes.mjs check template.json --stills stills` labels every still twice (a third
+   pass breaks ties), compares it with its reference slot (people, extras, hands, medium, device, prop, setting,
+   size, angle, facing, position, body in frame, focus), asks whether each setup's stills show the plate's place
+   and camera position, checks each voice line's role and length against its reference phrase and each screen
+   design against the reference layout, and writes `stills/check.json` and `STILLS-CHECK.md`. Regenerate a failing
+   still (a few cents) or waive the field with a reason; never animate a failing shot.
+5. **Producer review:** `node /app/tools/review.mjs --template template.json --reference-shots
+   analysis/reference/shots.json --reference <reference video> --stills stills --check stills/check.json --out
+   review.html`. One page: the reference and ours side by side frame by frame (arrow keys; ours is the render, or
+   the current shot's still before one exists), every shot's reference frames beside our stills, what must match
+   and what the check found, and a model per shot (Mini, Fast, full 720p, full 1080p, skip) with the running cost.
+   The producer approves shots, adds notes and copies the decisions JSON. The page embeds the reference: keep it
+   local, never publish it.
+6. **Animate:** `node /app/tools/keyframes.mjs frames template.json --stills stills --out . --decisions
+   decisions.json` writes one `seedance:FrameVideo` per shot from its approved still (a close-up runs to its last
+   frame), with the reference slot's motion energy and camera move, and `clips-plan.json`. Build `frames.svrun`,
+   export each clip to `assets/takes/<id>.mp4`, then `assemble.mjs` cuts each slot from the start of its clip.
+   Seedance bills at least 4 s a clip, so per-shot clips cost more than grouped ones; the locked stills are worth it.
+7. **Verify:** `shot-list.mjs <render> --compare analysis/reference/shots.json --waivers template.json`. DELTA.md
+   leads with the format-critical score (people, hands, medium, device, prop, setting, size, facing, body in frame,
+   repeated setups, recurring cast, cuts, duration, voice structure); it exits 2 while any critical miss is open.
+   Fix a failing shot by regenerating its still or its clip alone.
 
-`--group-by setup` puts every slot of a repeated setup in one clip (same set, light and camera), never mixes media,
-and writes `clips-plan.json`. `assemble.mjs` finds each clip's cuts (a cut between two shots of one setup scores
-low; it searches for that weaker peak), cuts each slot from inside its shot, slows a short shot by up to 1.35x with
-motion-interpolated frames, grades each slot into the template's brightness and saturation, and writes
-`assembly-sheet.jpg` (first, middle and last frame per slot). Read the sheet and the warnings before going on.
-A slot whose shot came out too short or wrong can be regenerated in a small replacement clip: append it to the plan
-and mark the original shot `"skip": true`. Regenerate the whole setup group, not one slot of it, or the repeat is
-lost. Put the longest shot first in a multi-shot clip; the last shots tend to come out short.
+The older grouped route (`shot-list.mjs --svml template.json --group 15 --group-by setup` and `assemble.mjs` on
+multi-shot clips) is cheaper but cannot hold the setups; use it only for a rough draft.
 
 Phone screens: let the generator film them. Keyed screens (green, then a design laid in) always look pasted on, so
 they are the fallback, not the plan. Set `"screenLine"` in the filled template (what every phone screen shows, for
@@ -354,6 +381,7 @@ exercises the whole `--analyze --spec` and `--compare` paths, with and without `
 
 | Date | Changes |
 | --- | --- |
+| 2026-10-22 | Reference-locked process: `keyframes.mjs` (setup plates, opening stills on them, screen designs on close-ups, a still gate against the reference slots with setup, voice-line and screen-layout checks, one first-frame clip per shot), `review.mjs` (frame-by-frame reference vs ours, stills, checks, per-shot model and cost, approvals), format-critical headline and waivers in `--compare`. |
 | 2026-10-22 | Screens filmed by the generator: `screenLine` plus an app-screen reference for held-up phones; first/last-frame close-ups from stills (`key-screen.py --mode still`); keying and `--mode restore` kept as fallbacks. Draft on Mini, per-shot review, upgrade only the picked shots. Pepper Lane v5: 385 of 464 format checks, 65 of 66 model-free, for $2.60. |
 | 2026-10-22 | Setup-grouped generation (`--group-by setup`, `groupWith`), `assemble.mjs` (cut matching with soft cuts, interpolated slowdown, look grading, replacement clips), `key-screen.py` (green-screen phone UIs, glow removal), `soundtrack.mjs` (phrase-fitted voice, tempo- and beat-matched ducked music, mastering). Pepper Lane v4: 386 of 464 format checks (reference against itself 454 of 463); model-free checks 65 of 66 (v3: 45 of 66). |
 | 2026-10-22 | Template@2: Hold constant variables per slot (people, hands, medium, device, prop, setting, text layer, layout), continuity (recurring characters, repeated setups), voice phrase map, measured tempo and beat sync, timeline fps; `--compare` writes DELTA.md; `--svml` uses the new fields; fallback labelling model. |

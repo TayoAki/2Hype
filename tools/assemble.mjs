@@ -8,7 +8,8 @@
 //
 // For each clip (<takes>/<clip id>.mp4) it finds the hard cuts, keeping the strongest ones when there are more
 // candidates than planned shots, and maps shots to slots in plan order. Each slot's segment is cut from inside its
-// own shot (two frames clear of either cut), centred in the shot unless the slot sets "cutAlign": "start" or "end",
+// own shot (two frames clear of either cut), centred in the shot unless the slot sets "cutAlign" (or the plan's shot
+// sets "align"): "start" or "end",
 // and slowed down (at most --max-slowdown, with motion-interpolated frames) when the shot came out shorter than the slot. When the template gives a
 // slot "brightness" and "saturation", the segment is graded just far enough to sit inside the template's tolerance
 // (brightness within 8%, saturation within 20%), so our palette changes as little as possible.
@@ -134,7 +135,7 @@ for (const clip of plan.clips) {
     const safe = Math.max(0, safeEnd - safeStart);
     let start, seconds, slowdown = 1;
     if (safe >= need) {
-      const align = slot.cutAlign ?? "center";
+      const align = shot.align ?? slot.cutAlign ?? "center";  // a clip animated from a keyframe starts on it: "start"
       start = align === "start" ? safeStart : align === "end" ? safeEnd - need : safeStart + (safe - need) / 2;
       seconds = need;
     } else {
