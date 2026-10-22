@@ -253,11 +253,18 @@ whole `--analyze --spec` path, with and without `--own`, at no cost.
   link. Stock photos, when the spec allows them, must be CC0, public domain or CC BY (not share-alike), with a
   credits file.
 - **OpenRouter balance:** audio analysis needs at least $0.50; a negative balance blocks all generation.
+- **Cutting multi-shot clips into slots.** Generated shots drift from the planned spans (Pepper Lane v3: 1 to 2 s),
+  and a clip can merge or drop a planned cut. Map slots from the detected cuts, not the plan. Scene detection reports
+  a cut up to one frame late, and two shots on the same set score low, so re-run it at `scene>0.12` and check the
+  frames on either side. Keep every segment 2 frames clear of a cut, then check each one has no cut inside it. A shot
+  shorter than its slot gets a mild slowdown (at most about 1.35x); with ffmpeg, `-t` goes *before* `-i`, or the
+  `setpts` stretch is cut back to the source length.
 
 ## Change log
 
 | Date | Changes |
 | --- | --- |
+| 2026-10-22 | Lessons for cutting multi-shot generated clips into measured slots (Pepper Lane v3 madlib build). |
 | 2026-10-22 | Two-stage builds (`hypit-stage.mjs clips`/`final`), preflight `lint` and `doctor`, failure protocol with `recover`, the provider job ledger, and frame-exact format matching with all compositions, poses, choreography and characters our own. |
 | 2026-10-20 | Own-content mode (`--own`): transcript, exact on-screen text, shot descriptions, full designs, prefilled prompts, rights checklist. Dropped connections are retried; `OPENROUTER_BASE_URL` for mock testing. |
 | 2026-10-20 | Initial version, from the Budapest reel, Pepper Lane ad and couple-formula builds: measured-format spec, paraphrased content summary, grouped multi-shot Seedance clips, verification against measured targets, and the failure lessons above. |
