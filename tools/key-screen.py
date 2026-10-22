@@ -7,7 +7,7 @@ left alone), keyed (a tapping finger stays in front) and filled with the screen 
 
   python3 tools/key-screen.py <in.mp4> <before.png> <after.png> <out.mp4> [--mode track|closeup|all]
                        [--button x0,y0,x1,y1] [--switch 0.55] [--glow x0,y0,x1,y1]
-  python3 tools/key-screen.py <still.png> <before.png> <after.png> <out.png> --mode still
+  python3 tools/key-screen.py <still.png> <before.png> <after.png> <out.png> --mode still [--ref <first out.png>]
   python3 tools/key-screen.py <in.mp4> <before.png> <after.png> <out.mp4> --mode restore --ref <out.png> [--button ...]
 
 --mode track (phone close-ups) tracks the phone as a plane: SIFT features on the bezel and case, matched to a frame
@@ -25,6 +25,8 @@ inside that box (fractions of the frame).
 In-camera close-ups (the better route: the generator films the screen with its own light, reflections and finger
 contact) use two more modes. --mode still puts the design on a generated still whose phone shows a plain white
 screen and writes <out>.json with the screen corners; that still is the first frame of an image-to-video clip.
+With --ref (an earlier --mode still output) the corners come from that still by a feature match: use it for a last
+frame where a finger crosses the screen.
 --mode restore then tracks the screen through the clip (matched to the still, then optical flow frame to frame with
 a dense-alignment pull back to the still), measures the clip's own light on the screen, keeps fingers that reach in
 from the screen edge, and lays the exact design back in so lettering the generator smudged is sharp again; with
@@ -288,6 +290,22 @@ if mode == "still":
     frame = cv2.imread(src)
     h, w = frame.shape[:2]
     quad, mask = white_quad(frame)
+    if "--ref" in sys.argv:
+        # A second still of the same phone (say, a finger pressing it): carry the first still's corners over by a
+        # feature match on the phone and hands, since a finger across the screen edge breaks the region's outline.
+        ref_path = opt("--ref", None)
+        ref, ref_quad = cv2.imread(ref_path), np.float32(json.load(open(ref_path + ".json"))["quad"])
+        around = np.zeros(ref.shape[:2], np.uint8)
+        cv2.fillConvexPoly(around, ref_quad.astype(np.int32), 255)
+        ring = cv2.dilate(around, np.ones((121, 121), np.uint8)) & ~cv2.erode(around, np.ones((9, 9), np.uint8))
+        sift, matcher = cv2.SIFT_create(4000), cv2.BFMatcher()
+        kr, dr = sift.detectAndCompute(cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY), ring)
+        k, d = sift.detectAndCompute(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), None)
+        good = [p[0] for p in matcher.knnMatch(dr, d, k=2) if len(p) == 2 and p[0].distance < 0.75 * p[1].distance] if dr is not None and d is not None else []
+        H, inl = cv2.findHomography(np.float32([kr[g.queryIdx].pt for g in good]), np.float32([k[g.trainIdx].pt for g in good]), cv2.RANSAC, 3.0) if len(good) >= 12 else (None, None)
+        if H is None or inl.sum() < 12:
+            sys.exit(f"{src}: could not match the phone to {ref_path} ({len(good)} matches); regenerate the still closer to it")
+        quad = refine(cv2.perspectiveTransform(ref_quad.reshape(-1, 1, 2), H).reshape(-1, 2).astype(np.float32), mask)
     ui, _ = fit_aspect(before, quad)
     sh, sw = ui.shape[:2]
     Hm = cv2.getPerspectiveTransform(np.float32([[0, 0], [sw, 0], [sw, sh], [0, sh]]), quad)

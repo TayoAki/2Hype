@@ -188,9 +188,18 @@ close-ups and `--mode all` for phones held up in wider shots, with our designed 
 every word is spelled right), then apply the slot's grade from `assembly.json`. Track mode follows the phone body,
 not the visible green, so a thumb over a corner no longer squashes the screen, and it replaces only each pixel's
 screen share, so a fast fingertip stays a finger instead of a ghost; the button flips when the finger reaches it.
-`--glow` removes the green light a screen throws on a face that looks at it. Better still, when there is budget:
-ask for a plain light-grey screen (a real phone's glow, no green on faces or fingers) and pass one phone reference
-image so the case is the same in every shot.
+`--glow` removes the green light a screen throws on a face that looks at it.
+
+Phone close-ups read best filmed in camera, because a keyed screen always looks pasted on: the light, the glass and
+the finger contact are wrong. Generate two stills per close-up (`gpt:Image`): the hands holding a realistic slim phone
+with a plain white screen and a finger about to tap, and the same shot (the first still as the only reference) with
+the fingertip on the button. Lay the design on both with `key-screen.py <still> <before.png> <after.png> <out.png>
+--mode still` (add `--ref <first out.png>` for the second still, whose finger crosses the screen edge). Use them as
+the first and last frames of a `seedance:FrameVideo` (hands only: both person references false) whose prompt
+says the finger presses at about one second and stays on the button, and that the screen does not change. Then
+`--mode restore --ref <first out.png> --button ...` tracks the screen through the clip, lays the exact design back
+in with the clip's own light (smudged lettering is sharp again), keeps the finger in front, flips to the after
+screen on the tap, and writes the tap frame to `<out>.json`; cut the slot's window around the tap and grade it.
 
 For a template@1 reference, or a single-clip-per-group build:
 
