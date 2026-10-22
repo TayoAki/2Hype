@@ -12,7 +12,7 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(digest(a), digest(b));
 }
 
-function signature(method: LinkMethod, project: string, path: string, expires: number): string {
+export function signature(method: LinkMethod, project: string, path: string, expires: number): string {
   return createHmac("sha256", config.signingSecret)
     .update(`${method}\n${project}\n${path}\n${expires}`)
     .digest("hex");

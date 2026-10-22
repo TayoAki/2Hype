@@ -8,6 +8,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { config } from "./config.js";
 import { existingProjectDir, resolveInside, UserError } from "./paths.js";
 import { safeEqual, verifySignature, type LinkMethod } from "./signing.js";
+import { mountStudio, registerStudioTools } from "./studio.js";
 import { registerHypitTools, SERVER_INSTRUCTIONS } from "./tools.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
@@ -60,6 +61,9 @@ app.get("/", (_req, res) => {
   );
 });
 
+// Remake Studio: the web app at /studio, its API and media (see studio.ts).
+mountStudio(app);
+
 app.get("/healthz", (_req, res) => {
   res.json({ ok: true, server: pkg.version, hypit: hypitVersion });
 });
@@ -70,6 +74,7 @@ async function handleMcp(req: Request, res: Response): Promise<void> {
     { instructions: SERVER_INSTRUCTIONS },
   );
   registerHypitTools(server, requestBaseUrl(req));
+  registerStudioTools(server, requestBaseUrl(req));
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on("close", () => {
     void transport.close();

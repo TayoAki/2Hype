@@ -19,7 +19,7 @@
 //
 // Template fields read here, beside the usual template@2 ones: references[].kind ("set", "cast", "screen" or "style";
 // plates use set and style images, stills add the cast and, for held-up phones, the screen), screenDesigns
-// ({ "<slot>": { before, after, button } }, paths from the template's folder), setupReferences ({ "S1": ["wall", ...] }:
+// ({ "<slot>": { before, after, button: "x0,y0,x1,y1" or buttonAt: <% down> } }, paths from the template's folder), setupReferences ({ "S1": ["wall", ...] }:
 // the set and style images, by file name, that go with each setup's plate; all of them otherwise), slot.firstFrame (the moment the
 // opening still shows, when the prompt describes a movement), slot.waive ({ field: reason } for a deliberate
 // difference from the reference) and keyframes.margin (seconds of spare clip, default 0.5).
@@ -163,10 +163,10 @@ function stills() {
       ...refs.map((r) => `    <gpt:Reference image={${asset(r.abs)}}/>`), "  </gpt:Image>");
     ids.push(`${id}.image`);
     const design = template.screenDesigns?.[s.slot];
-    if (closeup && design?.button) {
-      const [, y0, , y1] = design.button.split(",").map(Number);
-      const height = Number(design.height ?? 1950);
-      const down = Math.round((100 * (y0 + y1)) / 2 / height);
+    if (closeup && design) {
+      // Where the button sits on the screen: from its box in the design, else the design's buttonAt (% down).
+      const [, y0, , y1] = String(design.button ?? "").split(",").map(Number);
+      const down = design.button ? Math.round((100 * (y0 + y1)) / 2 / Number(design.height ?? 1950)) : Math.round(design.buttonAt ?? 75);
       svml.push(`  <text:Value id="${id}-last-prompt">`,
         `    The same shot as the reference image: the same phone in the same place and angle, the same hands, the same light`,
         `    and background, the same style. One change only: the index fingertip now presses the screen at its horizontal`,

@@ -22,7 +22,7 @@ import { adaptProfile } from "./profile.js";
 import { REMOTE_NOTES } from "./remote-notes.js";
 import { signedFileUrl } from "./signing.js";
 
-export const SERVER_INSTRUCTIONS = `Hypit turns agents into video producers: clone a reference video or describe one, author SVML/SVRun sources, and render with local HTML rendering plus hosted generation models. This server runs Hypit remotely. Start by calling hypit_docs (no arguments) to read the Hypit Skill and the remote-usage notes, then create or pick a project with project_create / project_list.`;
+export const SERVER_INSTRUCTIONS = `Hypit turns agents into video producers: clone a reference video or describe one, author SVML/SVRun sources, and render with local HTML rendering plus hosted generation models. This server runs Hypit remotely. Start by calling hypit_docs (no arguments) to read the Hypit Skill and the remote-usage notes, then create or pick a project with project_create / project_list. To remake a reference advert shot by shot (Remake Studio), use the studio_* tools: studio_list, studio_status, studio_brief, studio_run, studio_images, studio_decide; the same projects open in the web app at /studio.`;
 
 const IMAGE_TYPES: Record<string, string> = {
   ".png": "image/png",
