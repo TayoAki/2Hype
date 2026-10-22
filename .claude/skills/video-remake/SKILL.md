@@ -16,8 +16,9 @@ The builder never looks at the reference. Everything flows through VIDEO_SPEC.md
 
 | Copied exactly (measured) | Ours (written fresh) |
 | --- | --- |
-| Duration, aspect, fps, every cut point and shot length | Brand, palette, logo, slogan, end card |
+| Duration, aspect, fps, every cut point and shot length, to the frame | Brand, palette, logo, slogan, end card |
 | Shot grammar per slot: size, angle, camera move, beat role | Characters (designed from scratch), settings |
+| Beat order and how many shots each beat gets | Every composition, pose, gesture and piece of choreography |
 | Pacing curve, first-cut time, motion, brightness, saturation, contrast | Script and voiceover lines, deals and claims |
 | Loudness and true peak, voiceover presence and pace, music genre and tempo | Music (generated), voice (licensed preset) |
 | Where text sits and what role it plays | Every word on screen, every prompt |
@@ -142,13 +143,11 @@ Read VIDEO_SPEC.md and template.json completely before writing a file. Build onl
 
 ```bash
 node /app/tools/shot-list.mjs --svml analysis/reference/template.json --group 15 --out .
-hypit check main.svrun && hypit plan main.svrun && hypit pricing main.svrun
 ```
 
-- `--svml` writes `main.svml`, `main.svrun` and `look.svs` with one Seedance clip per group, each cut to its
-  slots' frames. Compare the pricing quote with the budget cap; stop and ask if it is over.
-- Then extend `main.svml` from part 5 of the spec: music (`asset:Audio` → `mediaop:Normalize` → `audio:Clip` with
-  `gain` and `fade-out`), voiceover, titles, captions, deal callouts and the end card (`@hypit/text-fine`).
+`--svml` writes `main.svml`, `main.svrun` and `look.svs` with one Seedance clip per group, each cut to its slots'
+frames. Then extend `main.svml` from part 5 of the spec: music (`asset:Audio` → `mediaop:Normalize` → `audio:Clip`
+with `gain` and `fade-out`), voiceover, titles, captions, deal callouts and the end card (`@hypit/text-fine`).
 
 ### 3c. Sound
 
@@ -158,21 +157,53 @@ hypit check main.svrun && hypit plan main.svrun && hypit pricing main.svrun
   model's `supported_voices`). For captions, get word timings from `/audio/transcriptions` with
   `response_format: "verbose_json"` and `timestamp_granularities: ["word"]`, and place text windows on frames.
 - Master to the spec's loudness (−14 LUFS for social is typical) with peaks at or below −1 dBTP.
+- Make the sound files before the build, so `lint` can measure them.
 
-### 3d. Build, verify, fix
+### 3d. Build in two stages, verify, fix
 
-1. `hypit runtime up --endpoint html.local --endpoint media.local`, then `hypit build main.svrun`; poll
-   `hypit status <id> --json`.
-2. Export to a **new** filename each time (`hypit get` will not overwrite): `exports/<name>-v<N>.mp4`.
-3. Verify against part 8 of the spec:
+Paid generation and the edit never share a Build. An edit mistake then costs a free re-render, never a payment.
+
+0. **Preflight** (every time):
+   ```bash
+   hypit doctor --endpoint openrouter.default        # key accepted and balance above the quote (+$0.50 for audio)
+   node /app/tools/hypit-stage.mjs lint main.svml    # every Window inside its Timeline; must print ✓
+   ```
+   Fix every lint error before going on. A rejected key (HTTP 401) means the user must update OPENROUTER_API_KEY
+   in Railway's service variables; never ask for the key in chat.
+1. **Clips stage (paid):**
+   ```bash
+   node /app/tools/hypit-stage.mjs clips main.svml --keep main.svrun   # targets only videos and images
+   hypit check clips.svrun && hypit plan clips.svrun && hypit pricing clips.svrun
+   hypit runtime up --endpoint html.local --endpoint media.local && hypit build clips.svrun
+   ```
+   Compare the quote with the budget cap first; stop and ask if it is over. Poll `hypit status <id> --json`.
+   Export and look at every generated clip and image (contact sheets) before the edit stage.
+2. **Edit stage (free):**
+   ```bash
+   node /app/tools/hypit-stage.mjs final main.svml --build <clips build id>
+   node /app/tools/hypit-stage.mjs lint main.svml
+   hypit pricing main.svrun    # must show every request as "No Provider charge"
+   hypit build main.svrun
+   ```
+3. Export to a **new** filename each time (`hypit get` will not overwrite): `exports/<name>-v<N>.mp4`.
+4. Verify against part 8 of the spec:
    ```bash
    node /app/tools/shot-list.mjs exports/<name>-vN.mp4 --out analysis/render-vN --metrics
    ```
    Compare duration, shot count, average shot, first cut and loudness with the targets. Look at the contact
    sheet and a 1 fps sheet for character consistency, misspelled generated text and callouts that cross a cut.
-4. Fix composition, timing and text with free re-renders: keep generated clips with `<build-record>` +
-   `<satisfy>` in the `.svrun`. Re-generate a clip only when the picture itself is wrong, and quote it first.
-5. Send the user the video and a `file_link` download URL.
+5. Fix composition, timing and text by editing `main.svml` and rebuilding the edit stage. Re-generate a clip only
+   when its picture is wrong: change that element, rerun `clips` with `--keep` so the rest are reused, and quote it.
+6. Send the user the video and a `file_link` download URL.
+
+### 3e. If a Build fails
+
+1. Stop. Do not rebuild yet, and do not trust the balance: OpenRouter charges when a job finishes.
+2. `OPENROUTER_API_KEY=... node /app/tools/hypit-stage.mjs recover --download references/recovered` lists every
+   submitted job with status and cost and saves finished ones.
+3. Fix the cause (lint again), then rebuild. Projects created or refreshed with `project_create` since the job ledger
+   shipped reuse a pending or finished job for an unchanged request automatically; recovered files can also be
+   brought in as `<file>` Candidates.
 
 ---
 
@@ -205,11 +236,11 @@ whole `--analyze --spec` path, with and without `--own`, at no cost.
 ## Error handling and lessons
 
 - **Every window must end inside the timeline.** A window `from` plus a media extent that overruns `end` fails the
-  build *after* paid clips have been submitted. Compute end frames before building.
-- **A failed build may already have paid for clips.** Before rebuilding, grep the project for job ids
-  (`grep -rhoa "gen-vid-[A-Za-z0-9_-]*" .hypit`), read them from OpenRouter (`GET /api/v1/videos/{id}`), download
-  finished takes (`/videos/{id}/content`) and reuse them with `<file>`/`<build-record>`. Never resubmit blindly.
-  Balances update after jobs finish, so a low charge right after a failure proves nothing.
+  build *after* paid clips have been submitted (Pepper Lane: a tagline at 822f lasting 85f in a 900f Timeline cost
+  a duplicate $2.05). `hypit-stage.mjs lint` catches this; the two-stage build makes it free when it slips through.
+- **A failed build may already have paid for clips.** Follow 3e: `recover` first, never resubmit blindly. Balances
+  update after jobs finish, so a low charge right after a failure proves nothing. The provider's job ledger reuses
+  jobs for unchanged requests; it covers projects whose Profile has `jobLedgerPath` (rerun `project_create`).
 - **Generated text misspells.** Phone screens, signs and packaging come out garbled even with "no readable text".
   Cover them with designed text-fine graphics placed over the measured screen area, or frame them out.
 - **Seedance:** reference audio needs a visual reference beside it; audio and video references travel as HTTPS
@@ -227,5 +258,6 @@ whole `--analyze --spec` path, with and without `--own`, at no cost.
 
 | Date | Changes |
 | --- | --- |
+| 2026-10-22 | Two-stage builds (`hypit-stage.mjs clips`/`final`), preflight `lint` and `doctor`, failure protocol with `recover`, the provider job ledger, and frame-exact format matching with all compositions, poses, choreography and characters our own. |
 | 2026-10-20 | Own-content mode (`--own`): transcript, exact on-screen text, shot descriptions, full designs, prefilled prompts, rights checklist. Dropped connections are retried; `OPENROUTER_BASE_URL` for mock testing. |
 | 2026-10-20 | Initial version, from the Budapest reel, Pepper Lane ad and couple-formula builds: measured-format spec, paraphrased content summary, grouped multi-shot Seedance clips, verification against measured targets, and the failure lessons above. |
