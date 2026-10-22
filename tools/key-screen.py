@@ -390,6 +390,7 @@ if mode == "restore":
     quads = np.array(quads)
     for i in range(1, len(quads) - 1):
         quads[i] = (quads[i - 1] + 2 * quads[i] + quads[i + 1]) / 4
+    track_quad, track_quads = ref_quad.copy(), quads.copy()  # still-to-frame mapping, for the clean screen plate
     designs = {}
     for name, img in (("before", before), ("after", after)):
         designs[name], offset = fit_aspect(img, ref_quad)
@@ -413,38 +414,81 @@ if mode == "restore":
     designs["pressed"] = pressed
     sh, sw = designs["before"].shape[:2]
     src_corners = np.float32([[0, 0], [sw, 0], [sw, sh], [0, sh]])
-    plans, contact = [], None
+    plans, contact, covers = [], None, []
+    debug = subprocess.Popen(["ffmpeg", "-hide_banner", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
+                              "-r", str(fps), "-i", "-", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", out + ".alpha.mp4"],
+                             stdin=subprocess.PIPE) if "--debug" in sys.argv else None
+    after_debug = sys.argv[sys.argv.index("--debug") + 1:][:1] if debug else []
+    debug_frame = int(after_debug[0]) if after_debug and after_debug[0].isdigit() else None  # --debug N: also N's images
     for i, (f, q) in enumerate(zip(frames, quads)):
         Hm = cv2.getPerspectiveTransform(src_corners, q)
         expected = cv2.warpPerspective(designs["before"].astype(np.float32), Hm, (w, h), flags=cv2.INTER_AREA)
+        # The clean plate: the still's screen (the generator's own rendering, no finger) carried into this frame.
+        clean = cv2.warpPerspective(ref.astype(np.float32), cv2.getPerspectiveTransform(track_quad, track_quads[i]), (w, h), flags=cv2.INTER_LINEAR)
         inside = np.zeros((h, w), np.uint8)
         cv2.fillConvexPoly(inside, q.astype(np.int32), 255)
         inside = cv2.erode(inside, np.ones((3, 3), np.uint8)) > 0
-        # Light on the screen: the clip's frame against the design, both heavily blurred (shape and colour of the
-        # glow, not the lettering).
+        f32 = f.astype(np.float32)
         sigma = max(6.0, 0.04 * np.linalg.norm(q[2] - q[0]))
-        blur = lambda img: cv2.GaussianBlur(img * inside[..., None], (0, 0), sigma) / np.maximum(cv2.GaussianBlur(inside.astype(np.float32), (0, 0), sigma), 1e-3)[..., None]
-        light = np.clip(blur(f.astype(np.float32)) / np.maximum(blur(expected), 1), 0.6, 1.4)
-        diff = np.linalg.norm(cv2.GaussianBlur(f.astype(np.float32), (0, 0), 1.5) - cv2.GaussianBlur(expected * light, (0, 0), 1.5), axis=2)
-        finger = border_components((diff > 45) & inside, q)
-        # Second pass: measure the light from screen pixels only, so a finger does not darken the design around it.
-        clear = inside & ~cv2.dilate(finger.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
-        if clear.sum() > 0.3 * inside.sum():
-            blur = lambda img: cv2.GaussianBlur(img * clear[..., None], (0, 0), sigma) / np.maximum(cv2.GaussianBlur(clear.astype(np.float32), (0, 0), sigma), 1e-3)[..., None]
-            light = np.clip(blur(f.astype(np.float32)) / np.maximum(blur(expected), 1), 0.6, 1.4)
-            diff = np.linalg.norm(cv2.GaussianBlur(f.astype(np.float32), (0, 0), 1.5) - cv2.GaussianBlur(expected * light, (0, 0), 1.5), axis=2)
-            finger = border_components((diff > 45) & inside, q)
-        occ = np.clip((diff - 30) / 35, 0, 1) * cv2.dilate(finger.astype(np.uint8), np.ones((7, 7), np.uint8))
+
+        def ratio(img, base, keep):
+            """Light: img over base, both heavily blurred inside keep (the glow's shape and colour, not lettering)."""
+            weight = np.maximum(cv2.GaussianBlur(keep.astype(np.float32), (0, 0), sigma), 1e-3)[..., None]
+            soft_ = lambda x: cv2.GaussianBlur(x * keep[..., None], (0, 0), sigma) / weight
+            return np.clip(soft_(img) / np.maximum(soft_(base), 1), 0.6, 1.4)
+
+        # Fingers: what departs from the clean plate (relit to this frame), in blobs that reach in from the edge.
+        # A second pass measures the light without the finger, so the finger's own colour does not leak into it.
+        clear = inside
+        for _ in range(2):
+            diff = np.linalg.norm(cv2.GaussianBlur(f32, (0, 0), 2) - cv2.GaussianBlur(clean * ratio(f32, clean, clear), (0, 0), 2), axis=2)
+            finger = border_components((diff > 40) & inside, q, min_share=0.008)
+            clear = inside & ~cv2.dilate(finger.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
+            if clear.sum() < 0.3 * inside.sum():
+                clear = inside
+                break
+        light = ratio(f32, expected, clear)
+        # Where the finger crosses a button of nearly its own colour, the difference alone misses part of it: near the
+        # finger, a pixel closer to the finger's own (measured) colour than to the clean screen is finger too.
+        sure = finger & (diff > 80)
+        if sure.sum() > 200:
+            skin = np.median(f32[sure], axis=0)
+            near = cv2.dilate(finger.astype(np.uint8), np.ones((25, 25), np.uint8)).astype(bool) & inside
+            to_skin = np.linalg.norm(f32 - skin, axis=2)
+            to_screen = np.linalg.norm(f32 - clean * ratio(f32, clean, clear), axis=2)
+            finger = finger | (near & (to_skin < 60) & (to_skin < 0.6 * to_screen))
+            # ...and a changed patch that is still nearer the screen's colour than the finger's (the generator's own
+            # button press, a smudged word) is screen, not finger.
+            finger &= ~((to_screen < to_skin) & (to_skin > 60))
+        # The finger is solid: its outline is soft (motion blur, anti-aliasing), its inside is never see-through. A
+        # finger's highlight can match a white screen, leaving only its edges and tip; the convex hull of each group
+        # of finger pieces fills it back in.
+        finger = border_components(finger & inside, q, min_share=0.008)
+        solid = np.zeros((h, w), np.uint8)
+        count, groups = cv2.connectedComponents(cv2.dilate(finger.astype(np.uint8), np.ones((25, 25), np.uint8)))
+        for g in range(1, count):
+            ys, xs = np.nonzero(finger & (groups == g))
+            if len(xs) >= 3:
+                cv2.fillConvexPoly(solid, cv2.convexHull(np.stack([xs, ys], 1).astype(np.int32)), 1)
+        solid &= inside.astype(np.uint8)
+        occ = np.maximum(np.clip((diff - 25) / 30, 0, 1) * cv2.dilate(finger.astype(np.uint8), np.ones((7, 7), np.uint8)),
+                         cv2.erode(solid, np.ones((5, 5), np.uint8)).astype(np.float32))
         a = cv2.GaussianBlur(inside.astype(np.float32) * (1 - occ), (3, 3), 0)
-        if button and contact is None:
-            zy0, zy1 = y0 - (y1 - y0), y1 + (y1 - y0)
-            zone = np.zeros((h, w), np.uint8)
-            cv2.fillConvexPoly(zone, cv2.perspectiveTransform(np.float32([[[x0, zy0]], [[x1, zy0]], [[x1, zy1]], [[x0, zy1]]]), Hm).astype(np.int32), 1)
-            if zone.sum() and ((a < 0.5) & (zone > 0)).sum() / zone.sum() > 0.16:
-                contact = i
+        if button:
+            box = np.zeros((h, w), np.uint8)
+            cv2.fillConvexPoly(box, cv2.perspectiveTransform(np.float32([[[x0, y0]], [[x1, y0]], [[x1, y1]], [[x0, y1]]]), Hm).astype(np.int32), 1)
+            covers.append(round(float(((a < 0.5) & (box > 0)).sum() / max(box.sum(), 1)), 4))
+        if debug:
+            debug.stdin.write(np.repeat((a * 255).astype(np.uint8)[..., None], 3, 2).tobytes())
+            if i == debug_frame:
+                cv2.imwrite(out + f".{i}.png", np.hstack([f, clean.clip(0, 255).astype(np.uint8), np.repeat(np.clip(diff * 2, 0, 255).astype(np.uint8)[..., None], 3, 2)]))
         plans.append((Hm, light, a))
-    if contact is None:
-        contact = len(frames)
+    if debug:
+        debug.stdin.close()
+        debug.wait()
+    # The tap: the first frame the finger covers a tenth of the button and is near its deepest cover of the next
+    # few frames (it has landed, not just passing on its way in).
+    contact = next((i for i, c in enumerate(covers) if c >= 0.10 and c >= 0.6 * max(covers[i:i + 7])), len(frames))
     writer = subprocess.Popen(["ffmpeg", "-hide_banner", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
                                "-r", str(fps), "-i", "-", "-c:v", "libx264", "-crf", "15", "-pix_fmt", "yuv420p", out], stdin=subprocess.PIPE)
     for i, (f, (Hm, light, a)) in enumerate(zip(frames, plans)):
@@ -455,7 +499,8 @@ if mode == "restore":
         writer.stdin.write((f * (1 - a3) + design * a3).clip(0, 255).astype(np.uint8).tobytes())
     writer.stdin.close()
     writer.wait()
-    json.dump({"quads": np.round(quads, 2).tolist(), "tap": contact, "frames": len(frames), "fps": fps}, open(out + ".json", "w"))
+    json.dump({"quads": np.round(quads, 2).tolist(), "tap": contact, "frames": len(frames), "fps": fps, "buttonCover": covers},
+              open(out + ".json", "w"))
     print(f"{out}: restored the design in {len(frames)} frames (optical flow on {flowed} of {len(frames) - 1} steps); "
           f"tap at frame {contact} (restore)")
     sys.exit(0)
