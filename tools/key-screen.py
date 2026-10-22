@@ -322,8 +322,10 @@ if mode == "still":
         good = [p[0] for p in matcher.knnMatch(dr, d, k=2) if len(p) == 2 and p[0].distance < 0.75 * p[1].distance] if dr is not None and d is not None else []
         H, inl = cv2.findHomography(np.float32([kr[g.queryIdx].pt for g in good]), np.float32([k[g.trainIdx].pt for g in good]), cv2.RANSAC, 3.0) if len(good) >= 12 else (None, None)
         if H is None or inl.sum() < 12:
-            sys.exit(f"{src}: could not match the phone to {ref_path} ({len(good)} matches); regenerate the still closer to it")
-        quad = refine(cv2.perspectiveTransform(ref_quad.reshape(-1, 1, 2), H).reshape(-1, 2).astype(np.float32), mask)
+            # Drawn too differently to carry the corners over: keep the white screen found in this frame itself.
+            print(f"{src}: could not match the phone to {ref_path} ({len(good)} matches); using the screen found in this frame", file=sys.stderr)
+        else:
+            quad = refine(cv2.perspectiveTransform(ref_quad.reshape(-1, 1, 2), H).reshape(-1, 2).astype(np.float32), mask)
     ui, _ = fit_aspect(before, quad)
     sh, sw = ui.shape[:2]
     Hm = cv2.getPerspectiveTransform(np.float32([[0, 0], [sw, 0], [sw, sh], [0, sh]]), quad)

@@ -193,10 +193,18 @@ function screens() {
     const id = `slot-${pad(n)}`, first = stillPath(id), last = stillPath(`${id}-last`);
     if (!first) { console.warn(`slot ${n}: no ${id}.png yet`); continue; }
     const before = resolve(base, d.before), after = resolve(base, d.after ?? d.before);
-    const go = (list) => { const r = spawnSync(python, [tool, ...list], { encoding: "utf8" }); if (r.status !== 0) throw new Error(`key-screen.py: ${r.stderr.slice(-300)}`); return r.stdout.trim(); };
-    console.log(go([first, before, after, join(stillsDir, `${id}-ui.png`), "--mode", "still"]));
-    // The last frame shows the screen after the tap, so the generator animates the change itself.
-    if (last) console.log(go([last, after, after, join(stillsDir, `${id}-last-ui.png`), "--mode", "still", "--ref", join(stillsDir, `${id}-ui.png`)]));
+    const go = (list) => {
+      const r = spawnSync(python, [tool, ...list], { encoding: "utf8" });
+      if (r.stderr.trim() && r.status === 0) console.warn(r.stderr.trim());
+      if (r.status !== 0) throw new Error(`key-screen.py: ${r.stderr.slice(-300)}`);
+      return r.stdout.trim();
+    };
+    // One close-up that can't take its screen keeps its plain still (the check flags it) rather than stopping the rest.
+    try {
+      console.log(go([first, before, after, join(stillsDir, `${id}-ui.png`), "--mode", "still"]));
+      // The last frame shows the screen after the tap, so the generator animates the change itself.
+      if (last) console.log(go([last, after, after, join(stillsDir, `${id}-last-ui.png`), "--mode", "still", "--ref", join(stillsDir, `${id}-ui.png`)]));
+    } catch (error) { console.warn(`slot ${n}: ${error.message}`); }
   }
 }
 
