@@ -182,24 +182,30 @@ A slot whose shot came out too short or wrong can be regenerated in a small repl
 and mark the original shot `"skip": true`. Regenerate the whole setup group, not one slot of it, or the repeat is
 lost. Put the longest shot first in a multi-shot clip; the last shots tend to come out short.
 
-Phone screens: generate them solid green, cut with `--no-grade` into a second folder, run
-`python3 /app/tools/key-screen.py <cut> <before.png> <after.png> <out> --mode track --button x0,y0,x1,y1` for
-close-ups and `--mode all` for phones held up in wider shots, with our designed screens (drawn, never generated, so
-every word is spelled right), then apply the slot's grade from `assembly.json`. Track mode follows the phone body,
-not the visible green, so a thumb over a corner no longer squashes the screen, and it replaces only each pixel's
-screen share, so a fast fingertip stays a finger instead of a ghost; the button flips when the finger reaches it.
-`--glow` removes the green light a screen throws on a face that looks at it.
+Phone screens: let the generator film them. Keyed screens (green, then a design laid in) always look pasted on, so
+they are the fallback, not the plan. Set `"screenLine"` in the filled template (what every phone screen shows, for
+example `"its screen shows the app from @image6"`) and add the app screen (designed, so every word is spelled right)
+to `references`; `--svml` then asks for that screen on every held-up phone instead of solid green. For phone
+close-ups, make the frames first: two stills per close-up (`gpt:Image`), the hands holding a realistic slim phone with
+a plain white screen and a finger about to tap, and the same shot (the first still as its only reference) with the
+fingertip on the button. Lay the design on both with `key-screen.py <still> <before.png> <after.png> <out.png> --mode
+still` (`--ref <first out.png>` for the second, where the finger crosses the screen edge; put the after screen on it
+if the button should change) and use them as the first and last frames of a `seedance:FrameVideo` (hands only: both
+person references false); the prompt says when the finger presses and that the screen does not scroll. Cut the
+slot's window around the press and grade it. Small lettering comes out slightly soft at 720p; a higher model and
+resolution fixes that, not post-processing.
 
-Phone close-ups read best filmed in camera, because a keyed screen always looks pasted on: the light, the glass and
-the finger contact are wrong. Generate two stills per close-up (`gpt:Image`): the hands holding a realistic slim phone
-with a plain white screen and a finger about to tap, and the same shot (the first still as the only reference) with
-the fingertip on the button. Lay the design on both with `key-screen.py <still> <before.png> <after.png> <out.png>
---mode still` (add `--ref <first out.png>` for the second still, whose finger crosses the screen edge). Use them as
-the first and last frames of a `seedance:FrameVideo` (hands only: both person references false) whose prompt
-says the finger presses at about one second and stays on the button, and that the screen does not change. Then
-`--mode restore --ref <first out.png> --button ...` tracks the screen through the clip, lays the exact design back
-in with the clip's own light (smudged lettering is sharp again), keeps the finger in front, flips to the after
-screen on the tap, and writes the tap frame to `<out>.json`; cut the slot's window around the tap and grade it.
+Draft, review, upgrade: build the whole video once on `mini` (cheapest), run `--compare` and the model-free checks,
+watch every shot, and give the producer a per-shot sheet (three frames, what the template asked for, what is off,
+the suggested fix and its price). Regenerate only the shots they pick, on the full model (`model="standard"`, 720p, or
+1080p where screen text must read), each as its own clip; a shot regenerated alone may drift from its neighbours'
+set, so regenerate a setup's shots together when they repeat.
+
+Fallbacks, when a screen must be exact: `key-screen.py --mode track --button ...` keys a green close-up (follows the
+phone body; replaces each pixel's screen share so a fingertip stays a finger), `--mode all` fills small held-up
+screens, `--glow` removes green spill on faces, and `--mode restore --ref <first out.png>` lays the exact design back
+over a generated close-up (it tracks the screen and keeps the finger in front, but a finger on a button of its own
+colour is hard to separate cleanly).
 
 For a template@1 reference, or a single-clip-per-group build:
 
@@ -348,6 +354,7 @@ exercises the whole `--analyze --spec` and `--compare` paths, with and without `
 
 | Date | Changes |
 | --- | --- |
+| 2026-10-22 | Screens filmed by the generator: `screenLine` plus an app-screen reference for held-up phones; first/last-frame close-ups from stills (`key-screen.py --mode still`); keying and `--mode restore` kept as fallbacks. Draft on Mini, per-shot review, upgrade only the picked shots. Pepper Lane v5: 385 of 464 format checks, 65 of 66 model-free, for $2.60. |
 | 2026-10-22 | Setup-grouped generation (`--group-by setup`, `groupWith`), `assemble.mjs` (cut matching with soft cuts, interpolated slowdown, look grading, replacement clips), `key-screen.py` (green-screen phone UIs, glow removal), `soundtrack.mjs` (phrase-fitted voice, tempo- and beat-matched ducked music, mastering). Pepper Lane v4: 386 of 464 format checks (reference against itself 454 of 463); model-free checks 65 of 66 (v3: 45 of 66). |
 | 2026-10-22 | Template@2: Hold constant variables per slot (people, hands, medium, device, prop, setting, text layer, layout), continuity (recurring characters, repeated setups), voice phrase map, measured tempo and beat sync, timeline fps; `--compare` writes DELTA.md; `--svml` uses the new fields; fallback labelling model. |
 | 2026-10-22 | Framing, expression, extras, focus, kinds of text, per-slot look, hands owner and phrase roles in the template; voted labels, agreed continuity with a thumbnail check, two-encoding transcription; `castMap`/`setupMap` in `--svml`; green-screen phone inserts. |
