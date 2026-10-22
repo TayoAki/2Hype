@@ -21,7 +21,10 @@ The builder never looks at the reference. Everything flows through VIDEO_SPEC.md
 | Beat order and how many shots each beat gets | Every composition, pose, gesture and piece of choreography |
 | Pacing curve, first-cut time, motion, brightness, saturation, contrast | Script and voiceover lines, deals and claims |
 | Loudness and true peak, voiceover presence and pace, music genre and tempo | Music (generated), voice (licensed preset) |
-| Where text sits and what role it plays | Every word on screen, every prompt |
+| Where text sits and what role it plays, and whether it is overlaid or part of the scene | Every word on screen, every prompt |
+| People per slot, which slots share a recurring character, which slots repeat one camera setup | Who those characters are and where the set is |
+| Medium per slot (animation, live action, graphics), phone and screen inserts and held props, end-card layout by zone | The product, the app screens, the props themselves |
+| Voice phrase timing and word count per phrase, voice type and delivery, music tempo and beat sync | Every voice line (same word count, our words) |
 
 The reference's content is recorded only as a short **paraphrased summary** (message, offers, call to action,
 brand positioning, cast archetypes, purpose of each on-screen text) so we understand it and can make ours
@@ -83,7 +86,10 @@ This writes, under `analysis/reference/`:
 
 - `shots.json`, `shots.csv`: every cut with timecodes, plus per-shot labels, motion and palette
 - `frames/`, `contact-sheet.jpg`, `index.html`: one frame per shot, for the human reviewing the analysis
-- `template.json`, `template.md`: the slot structure with an empty `prompt` per slot
+- `template.json`, `template.md` (`shot-list.template@2`): the slot structure with an empty `prompt` per slot, the
+  frames of each slot at the timeline rate, a **Hold constant** list (people per slot, recurring characters, repeated
+  setups, medium changes, phone motif, screen and end-card layouts, overlay versus in-scene text, voice phrases,
+  tempo), and a voice phrase table with an empty `line` per phrase
 - `VIDEO_SPEC.md`: parts 1-4 and 4b filled with measured values; parts 5-7 left for us
 - with `--own`: `transcript.json` and `transcript.srt`, spec parts 4c (transcript) and 4d (shot descriptions and
   exact on-screen text), and prompts prefilled in `template.json`
@@ -110,11 +116,17 @@ Check the analysis before moving on:
      existing well-known brand; tell the user to trademark-check it before real use.
    - Characters: each designed from scratch. Write one line on how each differs from the reference's cast in 4b
      (silhouette, palette, outfit, species or style).
-   - Script: our own lines, sized to the measured pace in part 4 (words per second × speech span).
+   - Script: one line of our own per voice phrase in `template.json` (`voiceover.phrases[].line`), with the same
+     word count (plus or minus one) so it lands on the same slots. If the reference has a voiceover, ours has one.
    - Music brief: genre, tempo and energy may follow part 4; the track is generated new.
    - Text system: a font, size, colour and position for each text role in part 3; all copy is ours.
-   - Slot prompts: write `prompt` for every slot in `template.json`. Keep each slot's timing and grammar. Add a
-     template-level `"style"` line and `"references"` for character and set sheets (see Phase 3).
+   - Slot prompts: write `prompt` for every slot in `template.json`. Keep each slot's timing, grammar and every
+     Hold constant line: the same number of people, our recurring character in the same slots, one set and camera
+     position for slots that repeat a setup, the same medium (a live-action food macro stays live action), a phone
+     held up where theirs is, and text in the scene where theirs is in the scene. Add a template-level `"style"`
+     line (or `"styleByMedium"`) and `"references"` for character and set sheets (see Phase 3).
+   - Screen inserts: when the reference shows a hand holding a phone, generate a hand holding a phone with a blank
+     screen (`--svml` asks for that) and lay our designed screen over it; a flat graphic card is a different shot.
 3. **Part 6, production plan**: models, seconds and quotes. Group slots into multi-shot clips (`--group 15`);
    Seedance bills at least 4 seconds per clip, so one clip per short slot can cost two to three times as much.
 4. **Part 7, originality checklist** (or, with `--own`, the rights checklist): tick every box before any paid step.
@@ -146,7 +158,8 @@ node /app/tools/shot-list.mjs --svml analysis/reference/template.json --group 15
 ```
 
 `--svml` writes `main.svml`, `main.svrun` and `look.svs` with one Seedance clip per group, each cut to its slots'
-frames. Then extend `main.svml` from part 5 of the spec: music (`asset:Audio` → `mediaop:Normalize` → `audio:Clip`
+frames at the template's `timelineFps` (24 for 23.976 fps references, so 24 fps Seedance footage needs no repeated
+frames). Each shot line carries its people count, hands and phone instructions; a change of medium starts a new clip. Then extend `main.svml` from part 5 of the spec: music (`asset:Audio` → `mediaop:Normalize` → `audio:Clip`
 with `gain` and `fade-out`), voiceover, titles, captions, deal callouts and the end card (`@hypit/text-fine`).
 
 ### 3c. Sound
@@ -186,12 +199,16 @@ Paid generation and the edit never share a Build. An edit mistake then costs a f
    hypit build main.svrun
    ```
 3. Export to a **new** filename each time (`hypit get` will not overwrite): `exports/<name>-v<N>.mp4`.
-4. Verify against part 8 of the spec:
+4. Verify against the reference analysis (about $0.02):
    ```bash
-   node /app/tools/shot-list.mjs exports/<name>-vN.mp4 --out analysis/render-vN --metrics
+   node /app/tools/shot-list.mjs exports/<name>-vN.mp4 --out analysis/render-vN --compare analysis/reference/shots.json
    ```
-   Compare duration, shot count, average shot, first cut and loudness with the targets. Look at the contact
-   sheet and a 1 fps sheet for character consistency, misspelled generated text and callouts that cross a cut.
+   This measures the render on the reference's own slots and writes `DELTA.md`: every cut, frame rate, repeated
+   frames, brightness, saturation, loudness, tempo, beat sync, voice, and per slot people, medium, device, prop,
+   setting, text layer, size, motion and voice words, plus repeated setups and recurring characters. Fix every miss
+   on a Hold constant variable; camera move, prop and setting labels are noisier, so check those misses by eye. Look
+   at the contact sheet and a 1 fps sheet for character consistency, misspelled generated text and callouts that
+   cross a cut.
 5. Fix composition, timing and text by editing `main.svml` and rebuilding the edit stage. Re-generate a clip only
    when its picture is wrong: change that element, rerun `clips` with `--keep` so the rest are reused, and quote it.
 6. Send the user the video and a `file_link` download URL.
@@ -230,8 +247,8 @@ Known gaps: {anything not matched, substituted or covered}
 
 `OPENROUTER_BASE_URL` points `tools/shot-list.mjs` at any OpenRouter-compatible server. A small local mock that
 answers `/chat/completions` by `response_format.json_schema.name` (`shot_labels`, `own_shot_labels`,
-`audio_labels`, `content_summary`, `own_content`) and `/audio/transcriptions` with a `words` array exercises the
-whole `--analyze --spec` path, with and without `--own`, at no cost.
+`continuity`, `audio_labels`, `content_summary`, `own_content`) and `/audio/transcriptions` with a `words` array
+exercises the whole `--analyze --spec` and `--compare` paths, with and without `--own`, at no cost.
 
 ## Error handling and lessons
 
@@ -253,6 +270,13 @@ whole `--analyze --spec` path, with and without `--own`, at no cost.
   link. Stock photos, when the spec allows them, must be CC0, public domain or CC BY (not share-alike), with a
   credits file.
 - **OpenRouter balance:** audio analysis needs at least $0.50; a negative balance blocks all generation.
+- **Labelling:** Gemini sometimes refuses a frame set (HTTP 200 with "blocked the response"); the tool retries that
+  shot on `--fallback-model` (default `openai/gpt-4.1-mini`).
+- **Template only held timing (Pepper Lane v3).** Matching every cut to the frame still produced a different-feeling
+  ad: no voiceover where the reference talks over 15 of 20 slots, singles where it uses a recurring pair, an empty
+  store where it shows ten shoppers, flat app cards where it shows a hand holding a phone, clay food where it
+  switches to live action, overlays where its text is in the scene, a 30 fps timeline that repeated every fifth
+  frame, and music 13% slower. Template@2 records each of these, and `--compare` checks them.
 - **Cutting multi-shot clips into slots.** Generated shots drift from the planned spans (Pepper Lane v3: 1 to 2 s),
   and a clip can merge or drop a planned cut. Map slots from the detected cuts, not the plan. Scene detection reports
   a cut up to one frame late, and two shots on the same set score low, so re-run it at `scene>0.12` and check the
@@ -264,6 +288,7 @@ whole `--analyze --spec` path, with and without `--own`, at no cost.
 
 | Date | Changes |
 | --- | --- |
+| 2026-10-22 | Template@2: Hold constant variables per slot (people, hands, medium, device, prop, setting, text layer, layout), continuity (recurring characters, repeated setups), voice phrase map, measured tempo and beat sync, timeline fps; `--compare` writes DELTA.md; `--svml` uses the new fields; fallback labelling model. |
 | 2026-10-22 | Lessons for cutting multi-shot generated clips into measured slots (Pepper Lane v3 madlib build). |
 | 2026-10-22 | Two-stage builds (`hypit-stage.mjs clips`/`final`), preflight `lint` and `doctor`, failure protocol with `recover`, the provider job ledger, and frame-exact format matching with all compositions, poses, choreography and characters our own. |
 | 2026-10-20 | Own-content mode (`--own`): transcript, exact on-screen text, shot descriptions, full designs, prefilled prompts, rights checklist. Dropped connections are retried; `OPENROUTER_BASE_URL` for mock testing. |
