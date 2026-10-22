@@ -3,7 +3,8 @@
 // framing or a head count across shots, so each shot is made as a still first and checked; video only animates it.
 //
 //   node tools/keyframes.mjs plates  <template.json> --out <dir>    one empty-set still per camera setup the reference repeats
-//   node tools/keyframes.mjs stills  <template.json> --out <dir>    each shot's opening still, built on its setup's plate
+//   node tools/keyframes.mjs stills  <template.json> --out <dir> [--only 12,13]
+//                                                                    each shot's opening still, built on its setup's plate
 //                                                                    (screen close-ups also get a last frame: finger on the button)
 //   node tools/keyframes.mjs screens <template.json> --stills <dir> [--python python3]
 //                                                                    lays the designed app screens on the close-up stills
@@ -41,7 +42,8 @@ const templatePath = resolve(templateArg);
 const base = dirname(templatePath);
 const template = JSON.parse(readFileSync(templatePath, "utf8"));
 const pad = (n) => String(n).padStart(2, "0");
-const slots = template.slots.filter((s) => s.generate !== false);
+const only = opt("--only") ? opt("--only").split(",").map(Number) : null;  // regenerate or re-check just these slots
+const slots = template.slots.filter((s) => s.generate !== false && (!only || only.includes(s.slot)));
 const castMap = template.castMap ?? {}, setupMap = template.setupMap ?? {};
 const references = (template.references ?? []).map((r) => ({ ...r, kind: r.kind ?? (r.personReference ? "cast" : "set"), abs: resolve(base, r.path) }));
 const styleOf = (s) => svmlText(template.styleByMedium?.[s.medium] ?? template.style ?? "");
@@ -67,6 +69,15 @@ function writeRun(out, name, ids, svml) {
 const header = (imports) => ['<?svml using="@hypit/markup@1"?>', "<svml>", '  <import as="text" from="@hypit/text@1"/>', '  <import as="asset" from="@hypit/media@1"/>',
   ...imports, ""];
 const assetLine = (id, abs, out) => `  <asset:Image id="${id}" src="./${relative(out, abs).split("\\").join("/")}"/>`;
+
+/** Our characters in a slot: castMap names for its character ids, plus any cast-sheet name its prompt mentions. */
+function castNames(s) {
+  const named = [s.characters ?? []].flat().map((c) => castMap[c.replace(/^hands:/, "")]).filter(Boolean);
+  const sheets = references.filter((r) => r.kind === "cast");
+  const inPrompt = (s.prompt.match(/\b[A-Z][a-z]+\b/g) ?? []).filter((n) => sheets.some((r) => new RegExp(`^(is|shows) ${n}\\b|\\b${n}\\b`).test(r.role ?? "")));
+  return [...new Set([...named, ...inPrompt])];
+}
+const sheetsFor = (names) => references.filter((r) => r.kind === "cast" && names.some((n) => new RegExp(`\\b${n}\\b`).test(r.role ?? "")));
 
 // ---------- plates ----------
 
@@ -129,9 +140,9 @@ function stills() {
     if (plate) refs.push({ abs: plate, role: setups[setup].closer.includes(s.slot)
       ? "is the set for this shot, seen wider: this shot is a closer angle in the same place, with the same props and light"
       : "is the empty set for this shot: keep its background, props, lighting and camera position exactly and place the characters into it" });
-    // Only the character sheets for who is in this shot (named in castMap for its characters, or in its prompt).
-    const names = [...[s.characters ?? []].flat().map((c) => castMap[c.replace(/^hands:/, "")]).filter(Boolean), ...(s.prompt.match(/\b[A-Z][a-z]+\b/g) ?? [])];
-    const sheets = references.filter((x) => x.kind === "cast" && names.some((n) => new RegExp(`\\b${n}\\b`).test(x.role ?? "")));
+    // Only the character sheets for who is in this shot (named in castMap for its characters, or in its prompt);
+    // one character per sheet, or the generator picks the wrong person off a lineup.
+    const sheets = sheetsFor(castNames(s));
     // Character sheets are drawings of our cast: never for live action, all of them only when the slot names characters.
     const animated = s.medium !== "live-action";
     if (people && animated) for (const r of sheets.length ? sheets : (s.characters ?? []).some((c) => /^C\d+$/.test(c)) ? references.filter((x) => x.kind === "cast") : []) refs.push(r);
@@ -193,7 +204,7 @@ function screens() {
 
 const STILL_FIELDS = ["people_count", "extras_count", "hands_in_frame", "medium", "device", "held_prop", "setting", "shot_size", "angle",
   "facing", "subject_position", "subject_scale", "depth_of_field", "expression"];
-const SOFT = new Set(["expression"]);  // reported, never blocking
+const SOFT = new Set(["expression", "depth_of_field"]);  // look choices: reported, never blocking
 const STILL_SCHEMA = { ...SCHEMA, required: SCHEMA.required.filter((k) => k !== "camera_move" && k !== "beat") };
 STILL_SCHEMA.properties = Object.fromEntries(Object.entries(SCHEMA.properties).filter(([k]) => STILL_SCHEMA.required.includes(k)));
 
@@ -259,6 +270,38 @@ async function check() {
   };
   await Promise.all(Array.from({ length: 3 }, worker));
 
+  // Cast: every named character is in the still and looks like their sheet; nobody else is featured.
+  const CAST_SCHEMA = { type: "object", additionalProperties: false, required: ["characters", "others"], properties: {
+    characters: { type: "array", items: { type: "object", additionalProperties: false, required: ["name", "present", "matches_design", "prominence", "note"],
+      properties: { name: { type: "string" }, present: { type: "boolean" }, matches_design: { type: "boolean" },
+        prominence: { type: "string", enum: ["main", "secondary", "background", "absent"] }, note: { type: "string" } } } },
+    others: { type: "integer" } } };
+  for (const s of slots) {
+    const entry = report.slots[s.slot];
+    const names = castNames(s), sheets = sheetsFor(names);
+    if (!entry?.file || !(s.people_count > 0) || !names.length || !sheets.length) continue;
+    const content = [{ type: "text", text: `Image 1 is a still from an advert. The other images are character sheets for ${names.join(", ")}.
+For each named character, say whether they appear in the still (present), whether hair, skin, face, clothes and
+accessories match their sheet, judging only what this angle shows (a character seen from behind is on model when their
+hair, build and clothes match) (matches_design), and how prominent they are (main: a subject of the shot; secondary;
+background: small or far behind). others: how many other people in the still are as prominent as a main or secondary
+character and are none of these. note: what differs, at most 12 words, or an empty string.` }, image(resolve(base, entry.file))];
+    for (const r of sheets) content.push({ type: "text", text: `Sheet: ${svmlText(r.role ?? "")}` }, image(r.abs));
+    try {
+      const { result, cost } = await ask(model, content, CAST_SCHEMA, "cast_check");
+      report.cost += cost;
+      // A named character is featured: present, on model, and not lost in the background.
+      entry.cast = result.characters.filter((c) => names.includes(c.name)).map((c) => ({ ...c, ok: c.present && c.matches_design && ["main", "secondary"].includes(c.prominence),
+        ...(c.present && !["main", "secondary"].includes(c.prominence) ? { note: c.note || "only in the background" } : {}) }));
+      for (const n of names) if (!entry.cast.some((c) => c.name === n)) entry.cast.push({ name: n, present: false, matches_design: false, prominence: "absent", note: "not reported", ok: false });
+      // Others as prominent as the cast: allowed up to the featured people the slot has beyond its named characters,
+      // plus the background people it asks for (a checker often counts a nearby extra as featured).
+      entry.castOthers = Math.max(0, result.others - Math.max(0, (s.people_count ?? 0) - names.length) - (s.extras_count ?? 0));
+      const castOk = entry.cast.every((c) => c.ok) && entry.castOthers === 0;
+      if (!castOk && !s.waive?.cast) entry.pass = false;
+    } catch (error) { console.error(`  cast ${s.slot}: ${error.message}`); }
+  }
+
   // Setups: the model compares every still of a setup with its plate (same place, same camera position).
   const SETUP_SCHEMA = { type: "object", additionalProperties: false, required: ["shots"], properties: { shots: { type: "array", items: { type: "object",
     additionalProperties: false, required: ["slot", "same_place", "same_camera", "note"], properties: { slot: { type: "integer" }, same_place: { type: "boolean" },
@@ -291,10 +334,15 @@ background, props and layout) and whether it is shot from the same camera positi
     const LINE_SCHEMA = { type: "object", additionalProperties: false, required: ["phrases"], properties: { phrases: { type: "array", items: { type: "object",
       additionalProperties: false, required: ["phrase", "role"], properties: { phrase: { type: "integer" }, role: { type: "string", enum: PHRASE_ROLES } } } } } };
     try {
-      const { result, cost } = await ask(model, [{ type: "text", text: `These are the voiceover lines of an advert, in order. Give each line's role in the advert.\n${phrases.map((p) => `${p.phrase}: ${p.line}`).join("\n")}` }], LINE_SCHEMA, "line_roles");
-      report.cost += cost;
+      // Three passes vote per line: one pass flips between neighbouring roles from run to run.
+      const passes = [];
+      for (let i = 0; i < 3; i++) {
+        const { result, cost } = await ask(model, [{ type: "text", text: `These are the voiceover lines of an advert, in order; the last one is spoken over the end card with the logo. Give each line's role in the advert.\n${phrases.map((p) => `${p.phrase}: ${p.line}`).join("\n")}` }], LINE_SCHEMA, "line_roles");
+        report.cost += cost;
+        passes.push(result.phrases);
+      }
       for (const p of phrases) {
-        const got = result.phrases.find((x) => x.phrase === p.phrase)?.role;
+        const got = majority(passes.map((list) => list.find((x) => x.phrase === p.phrase)?.role).filter(Boolean));
         const words = p.line.replace(/-/g, " ").split(/\s+/).filter(Boolean).length;
         report.lines.push({ phrase: p.phrase, want: p.role, got, words, wantWords: p.words, pass: (!p.role || got === p.role) && Math.abs(words - p.words) <= 1 });
       }
@@ -307,7 +355,7 @@ background, props and layout) and whether it is shot from the same camera positi
     const note = template.slots.find((s) => s.slot === Number(n))?.layout_note;
     if (!note) continue;
     try {
-      const { result, cost } = await ask(model, [{ type: "text", text: `Does this phone screen design follow this layout: "${note}"? Judge the zones, how many main elements there are and their relative sizes, not the words or colours. differences: what to change, at most 25 words, or an empty string.` }, image(resolve(base, d.before))], SCREEN_SCHEMA, "screen_layout");
+      const { result, cost } = await ask(model, [{ type: "text", text: `This is a phone screen design on its own. A reference shot was described as: "${note}". Judge only the screen's own layout against the part of that description about what the screen shows (its zones, how many main elements there are and their relative sizes); ignore hands, the frame around the phone, overlays, words and colours. differences: what to change on the screen, at most 25 words, or an empty string.` }, image(resolve(base, d.before))], SCREEN_SCHEMA, "screen_layout");
       report.cost += cost;
       report.screens[n] = result;
     } catch (error) { console.error(`  screen ${n}: ${error.message}`); }
@@ -318,8 +366,8 @@ background, props and layout) and whether it is shot from the same camera positi
   const out = join(stillsDir, "check.json");
   writeFileSync(out, `${JSON.stringify(report, null, 2)}\n`);
   const md = ["# Stills check", "", `${slots.length - failing.length} of ${slots.length} shots pass${failing.length ? `; failing: ${failing.join(", ")}` : ""}. Labelled with ${model} for $${report.cost.toFixed(3)}.`, "",
-    "| Shot | Result | Misses (ours, want) | Set |", "|---|---|---|---|",
-    ...slots.map((s) => { const r = report.slots[s.slot] ?? {}; return `| ${s.slot} | ${r.pass ? "pass" : "FAIL"} | ${(r.misses ?? []).map((m) => `${m.field}: ${m.got} (want ${m.want})${m.waived ? ` [waived: ${m.waived}]` : m.critical === false ? " [soft]" : ""}`).join("; ") || "-"} | ${r.setup ? `${r.setup.same ? "same" : "DIFFERS"} as plate ${r.setup.plate}${r.setup.note ? `: ${r.setup.note}` : ""}` : "-"} |`; }),
+    "| Shot | Result | Misses (ours, want) | Cast | Set |", "|---|---|---|---|---|",
+    ...slots.map((s) => { const r = report.slots[s.slot] ?? {}; return `| ${s.slot} | ${r.pass ? "pass" : "FAIL"} | ${(r.misses ?? []).map((m) => `${m.field}: ${m.got} (want ${m.want})${m.waived ? ` [waived: ${m.waived}]` : m.critical === false ? " [soft]" : ""}`).join("; ") || "-"} | ${r.cast ? r.cast.map((c) => `${c.name} ${c.ok ? "ok" : c.present ? `looks wrong${c.note ? ` (${c.note})` : ""}` : "MISSING"}`).join("; ") + (r.castOthers ? `; +${r.castOthers} other` : "") : "-"} | ${r.setup ? `${r.setup.same ? "same" : "DIFFERS"} as plate ${r.setup.plate}${r.setup.note ? `: ${r.setup.note}` : ""}` : "-"} |`; }),
     ...(report.lines.length ? ["", "## Voice lines", "| Phrase | Role (ours, want) | Words (ours, want) | Result |", "|---|---|---|---|",
       ...report.lines.map((l) => `| ${l.phrase} | ${l.got} (${l.want ?? "-"}) | ${l.words} (${l.wantWords}) | ${l.pass ? "pass" : "FAIL"} |`)] : []),
     ...(Object.keys(report.screens).length ? ["", "## Screen layouts", ...Object.entries(report.screens).map(([n, r]) => `- Slot ${n}: ${r.matches ? "matches" : "differs"}${r.differences ? `: ${r.differences}` : ""}`)] : []), ""];

@@ -247,10 +247,28 @@ def motion_blur(img, velocity):
 
 
 def white_quad(frame):
-    """Corners of the largest bright, colourless, roughly rectangular region: a plain glowing phone screen."""
+    """Corners of a plain glowing phone screen: the largest bright, rectangular hole inside the phone's dark bezel
+    (so a light backdrop is not taken for the screen), else the largest bright, colourless region."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = ((hsv[..., 2] > 200) & (hsv[..., 1] < 45)).astype(np.uint8) * 255
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    bright = ((hsv[..., 2] > 200) & (hsv[..., 1] < 45)).astype(np.uint8) * 255
+    dark = cv2.morphologyEx((hsv[..., 2] < 80).astype(np.uint8) * 255, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    contours, hierarchy = cv2.findContours(dark, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    best, best_area = None, 0.02 * frame.shape[0] * frame.shape[1]
+    for i, c in enumerate(contours):
+        if hierarchy is None or hierarchy[0][i][3] < 0:
+            continue  # only holes: regions enclosed by something dark
+        area = cv2.contourArea(c)
+        (_, _), (rw, rh), _ = cv2.minAreaRect(c)
+        if area <= best_area or rw * rh == 0 or area / (rw * rh) < 0.8:
+            continue
+        hole = np.zeros(dark.shape, np.uint8)
+        cv2.drawContours(hole, [c], -1, 255, -1)
+        if (bright[hole > 0] > 0).mean() > 0.5:
+            best, best_area = hole, area
+    mask = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    if best is not None:
+        mask = cv2.bitwise_and(cv2.dilate(best, np.ones((5, 5), np.uint8)), mask)
+        return corners_from_region(best), mask
     return corners_from_region(mask), mask
 
 

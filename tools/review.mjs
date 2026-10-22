@@ -226,6 +226,8 @@ function chips(s) {
   if (!s.check) return '<span class="muted">not checked yet</span>';
   const c = s.check, out = [];
   for (const m of c.misses || []) out.push('<span class="chip ' + (m.waived ? "waive" : "bad") + '" title="' + (m.waived ? "waived: " + m.waived : "") + '">' + label(m.field) + ": " + m.got + " (want " + m.want + ")" + "</span>");
+  for (const p of c.cast || []) out.push('<span class="chip ' + (p.ok ? "ok" : "bad") + '">' + p.name + ": " + (p.ok ? "matches sheet" : !p.present ? "missing" : p.matches_design === false ? "looks wrong" + (p.note ? " (" + p.note + ")" : "") : "only in the background") + "</span>");
+  if (c.castOthers) out.push('<span class="chip bad">' + c.castOthers + " unexpected character" + (c.castOthers > 1 ? "s" : "") + "</span>");
   if (c.setup) out.push('<span class="chip ' + (c.setup.same ? "ok" : "bad") + '">set ' + (c.setup.same ? "matches" : "differs from") + " plate " + (c.setup.plate || "") + (c.setup.note ? ": " + c.setup.note : "") + "</span>");
   if (!out.length) out.push('<span class="chip ok">every checked variable matches</span>');
   return out.join("");
